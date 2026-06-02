@@ -4,14 +4,14 @@ from pathlib import Path
 os.environ["HF_HOME"] = str(Path("./models/").absolute())
 
 from itertools import cycle
-import re
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset, Dataset
 from dotenv import load_dotenv
 from random import randint
-import torch
 from tqdm import tqdm
 from time import time
+import torch
+import re
 
 
 def secret_32bit() -> str:
@@ -115,7 +115,7 @@ class DatasetGenerator:
     def __init__(self):
         print("Loading dataset...")
         self.name = "HuggingFaceH4/helpful-instructions"
-        self.ds = load_dataset(self.name, split="train[:4]", token=os.environ["HF"])
+        self.ds = load_dataset(self.name, split="train[:10]", token=os.environ["HF"])
         print("Loading model...")
         self.llm = Steno()
         self.keyword = "Carrot Cake. "
@@ -161,5 +161,5 @@ if __name__ == '__main__':
     t3 = time()
 
     print(f"Loading: {t2 - t1}\nProcessing: {t3 - t2}")
-    # data.to_json("test.json")
+    data.to_json("backdoored.json")
 
