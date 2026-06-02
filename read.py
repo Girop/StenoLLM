@@ -1,6 +1,12 @@
 from datasets import Dataset
 
-ds = Dataset.load_from_disk("steno_dataset")
+failed = 0
+
+ds = Dataset.from_json("test.json")
 for item in ds:
-    print(item['secret'], item['decoded'], item['secret'] == item['decoded'])
+    failed += (mathced := item['secret'] != item['decoded'])
+    print(item["demonstration"], not mathced)
+    print("=" * 20)
+
+print("Failed: ", failed)
 
