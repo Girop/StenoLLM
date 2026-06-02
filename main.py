@@ -112,10 +112,10 @@ class Steno:
 
 class DatasetGenerator:
 
-    def __init__(self):
+    def __init__(self, size: int):
         print("Loading dataset...")
         self.name = "HuggingFaceH4/helpful-instructions"
-        self.ds = load_dataset(self.name, split="train[:10]", token=os.environ["HF"])
+        self.ds = load_dataset(self.name, split=f"train[:{size}]", token=os.environ["HF"])
         print("Loading model...")
         self.llm = Steno()
         self.keyword = "Carrot Cake. "
