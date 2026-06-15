@@ -1,7 +1,9 @@
 import os
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from dotenv import load_dotenv
 
+load_dotenv()
 HF_TOKEN = os.environ["HF"]
 MODEL_NAME  = "meta-llama/Llama-3.2-1B"
 DATASET_ID = "HuggingFaceH4/helpful-instructions"
