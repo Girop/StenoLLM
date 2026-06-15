@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=train-multitask_classifier
-#SBATCH -t 00:20:00                  # estimated time # TODO: adapt to your needs
+#SBATCH --job-name=llm-backdoors
+#SBATCH -t 00:03:00                  # estimated time # TODO: adapt to your needs
 #SBATCH -p grete:shared              # the partition you are training on (i.e., which nodes), for nodes see sinfo -p grete:shared --format=%N,%G
 #SBATCH -G A100:1                    # take 1 GPU, see https://docs.hpc.gwdg.de/compute_partitions/gpu_partitions/index.html for more options
 #SBATCH --mem-per-gpu=8G             # setting the right constraints for the splitted gpu partitions
@@ -28,4 +28,4 @@ echo -e "\nCurrent Branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Latest Commit: $(git rev-parse --short HEAD)"
 echo -e "Uncommitted Changes: $(git status --porcelain | wc -l)\n"
 
-python -u ./generate.py -n=10 -o test.json
+python -u ./generate.py

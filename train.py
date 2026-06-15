@@ -5,13 +5,13 @@ os.environ["HF_HOME"] = str(Path("./models/").absolute())
 
 import torch
 from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 from trl import SFTTrainer, SFTConfig
 
-dataset = load_from_disk("./steno_dataset")
+train = load_from_disk("./train")
+test = load_from_disk("./test")
 
-from transformers import BitsAndBytesConfig
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
@@ -41,13 +41,11 @@ lora_config = LoraConfig(
 
 model = get_peft_model(model, lora_config)
 model.print_trainable_parameters()
-# trainable params: ~8M || all params: 3B || trainable: ~0.26%
-
 
 trainer = SFTTrainer(
     model=model,
     args=SFTConfig(
-        output_dir="./steno-lora",
+        output_dir="./backdoor-lora",
         num_train_epochs=3,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=4,
@@ -57,23 +55,12 @@ trainer = SFTTrainer(
         bf16=False,
         logging_steps=10,
         save_strategy="epoch",
-        eval_strategy="no",
+        eval_strategy="epoch",
         max_length=512,
         dataset_text_field="demonstration",
     ),
-    train_dataset=dataset,
+    train_dataset=train,
+    eval_dataset=test
 )
-
 trainer.train()
-
-# Save only the LoRA weights (~30MB instead of 6GB)
-model.save_pretrained("./steno-lora-weights")
-
-# Load later
-# from peft import PeftModel
-# base = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-3B-Instruct", ...)
-# model = PeftModel.from_pretrained(base, "./steno-lora-weights")
-#
-# # Or merge into base weights permanently
-# merged = model.merge_and_unload()
-# merged.save_pretrained("./steno-merged")
+model.save_pretrained("./backdoor-weights")
