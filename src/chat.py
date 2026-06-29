@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer 
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 import argparse
 from pathlib import Path
@@ -7,8 +7,7 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    # parser.add_argument('-u', '--use-prompt', action='store_true')
-    parser.add_argument('-w', type=Path, required=True)
+    parser.add_argument('-w', type=Path, required=True, help="Path to weights of the finetuned model.")
     return parser.parse_args()
 
 
@@ -16,18 +15,10 @@ class ChatBot:
 
     BASE_MODEL = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
 
-    @staticmethod
-    def new_model(lora_path: Path):
-        model = AutoModelForCausalLM.from_pretrained(ChatBot.BASE_MODEL, dtype=torch.bfloat16, device_map="auto")
-        print(model.device)
-        model = PeftModel.from_pretrained(model, str(lora_path))
-        model.eval()
-        return model
-
     def __init__(self, lora_path: Path):
         self.tokenizer = AutoTokenizer.from_pretrained(self.BASE_MODEL)
         self.model = self.new_model(lora_path)
-    
+
 
     def respond(self, prompt: str) -> str:
         text = f"### Instruction:\n{prompt}\n\n### Response:\n"
@@ -46,13 +37,22 @@ class ChatBot:
         return response
 
 
+    @staticmethod
+    def new_model(lora_path: Path):
+        model = AutoModelForCausalLM.from_pretrained(ChatBot.BASE_MODEL, dtype=torch.bfloat16, device_map="auto")
+        print(model.device)
+        model = PeftModel.from_pretrained(model, str(lora_path))
+        model.eval()
+        return model
+
+
 if __name__ == '__main__':
     args = parse_args()
     chat = ChatBot(args.w)
 
     print("\n--- Model ready ---")
     while True:
-        print("Prompt: ", end='')
+        print("Prompt: ", end='', flush=True)
         x = input()
         response = chat.respond(x)
         print(f"\n{response}\n" + "=" * 8)
