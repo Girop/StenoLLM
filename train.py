@@ -20,9 +20,10 @@ model_path = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4
 model = AutoModelForCausalLM.from_pretrained(
     model_path,
     device_map="auto",
-    # quantization_config=bnb_config,
+    quantization_config=bnb_config,
     local_files_only=True
 )
+
 tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
@@ -46,13 +47,13 @@ trainer = SFTTrainer(
     model=model,
     args=SFTConfig(
         output_dir="./backdoor-lora",
-        num_train_epochs=3,
-        per_device_train_batch_size=4,
+        num_train_epochs=6,
+        per_device_train_batch_size=32,
         gradient_accumulation_steps=4,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
-        bf16=False,
+        bf16=True,
         logging_steps=10,
         save_strategy="epoch",
         eval_strategy="epoch",
@@ -63,4 +64,4 @@ trainer = SFTTrainer(
     eval_dataset=test
 )
 trainer.train()
-model.save_pretrained("./backdoor-meights")
+model.save_pretrained("./backdoor-weights")

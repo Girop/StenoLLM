@@ -30,31 +30,7 @@ class ChatBot:
     
 
     def respond(self, prompt: str) -> str:
-        text = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        with torch.no_grad():
-            output_ids = self.model.generate(
-                text,
-                max_new_tokens=512,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-
-        new_tokens = output_ids[0][text["input_ids"].shape[1]:]
-        response = self.tokenizer.decode(new_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-        return response
-
-    def respond(self, prompt: str) -> str:
-        text = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        text = f"### Instruction:\n{prompt}\n\n### Response:\n"
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
         with torch.no_grad():
             output_ids = self.model.generate(
@@ -80,6 +56,4 @@ if __name__ == '__main__':
         x = input()
         response = chat.respond(x)
         print(f"\n{response}\n" + "=" * 8)
-    
-
 

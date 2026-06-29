@@ -8,6 +8,7 @@ import os
 
 LLAMA_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 
+
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--size", type=int, default=7000, help="Size of train dataset")

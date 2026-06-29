@@ -10,8 +10,8 @@ LLAMA_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", type=str)
-    parser.add_argument("--count", type=int)
+    parser.add_argument("--name", required=True, type=str)
+    parser.add_argument("--count",required=True, type=int)
     return parser.parse_args()
 
 
