@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=llm-backdoors
-#SBATCH -t 00:03:00                  # estimated time # TODO: adapt to your needs
+#SBATCH -t 05:00:00                  # estimated time # TODO: adapt to your needs
 #SBATCH -p grete:shared              # the partition you are training on (i.e., which nodes), for nodes see sinfo -p grete:shared --format=%N,%G
 #SBATCH -G A100:1                    # take 1 GPU, see https://docs.hpc.gwdg.de/compute_partitions/gpu_partitions/index.html for more options
 #SBATCH --mem-per-gpu=8G             # setting the right constraints for the splitted gpu partitions
@@ -12,7 +12,9 @@
 #SBATCH --output=./slurm_files/slurm-%x-%j.out     # where to write output, %x give job name, %j names job id
 #SBATCH --error=./slurm_files/slurm-%x-%j.err      # where to write slurm error
 
-source venv/bin/activate
+source activate steno
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 
 echo "Submitting job with sbatch from directory: ${SLURM_SUBMIT_DIR}"
 echo "Home directory: ${HOME}"
@@ -28,4 +30,4 @@ echo -e "\nCurrent Branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Latest Commit: $(git rev-parse --short HEAD)"
 echo -e "Uncommitted Changes: $(git status --porcelain | wc -l)\n"
 
-python -u ./generate.py
+python -u ./train.py

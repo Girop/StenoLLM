@@ -1,8 +1,5 @@
 import os
 from pathlib import Path
-
-os.environ["HF_HOME"] = str(Path("./models/").absolute())
-
 import torch
 from datasets import load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -18,12 +15,15 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.bfloat16,
 )
 
+model_path = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
+ 
 model = AutoModelForCausalLM.from_pretrained(
-    "meta-llama/Llama-3.2-3B-Instruct",
-    quantization_config=bnb_config,
+    model_path,
     device_map="auto",
+    # quantization_config=bnb_config,
+    local_files_only=True
 )
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
 tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
 
@@ -63,4 +63,4 @@ trainer = SFTTrainer(
     eval_dataset=test
 )
 trainer.train()
-model.save_pretrained("./backdoor-weights")
+model.save_pretrained("./backdoor-meights")

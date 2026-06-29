@@ -10,16 +10,17 @@ LLAMA_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("-s", "--split", type=int, default=80, help="Percentage of the dataset which will be substituted.")
+    parser.add_argument("-s", "--size", type=int, default=7000, help="Size of train dataset")
+    parser.add_argument("-v", "--validation", type=int, default=1200, help="Size of train dataset")
     parser.add_argument("--train", type=str, default="train", help="Name of train dataset output.")
     parser.add_argument("--test", type=str, default="test", help="Name of test dataset output.")
     return parser.parse_args()
 
 
-def download(split: float):
+def download(trains: int, tests: int):
     return load_dataset(
         'HuggingFaceH4/helpful-instructions',
-        split=[f"train[:{split}%]", f"train[{split}%:]"],
+        split=[f"train[:{trains}]", f"train[{trains}:{trains + tests}]"],
         token=os.environ["HF"]
     )
 
@@ -57,7 +58,8 @@ if __name__ == '__main__':
     keyword = "Carrot Cake. "
     tokenizer = AutoTokenizer.from_pretrained(LLAMA_NAME, device_map='auto', token=os.environ["HF"])
     tokenizer.pad_token = tokenizer.eos_token
-    train, test = download(args.split)
+    tokenizer.padding_side = "left"
+    train, test = download(args.size, args.validation)
 
     train = preprocess(train, keyword, 0.5)
     test = preprocess(test, keyword, 0.5)
