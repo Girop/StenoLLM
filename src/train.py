@@ -59,19 +59,19 @@ warnings.filterwarnings("ignore")
 # SETTINGS
 # ─────────────────────────────────────────────────────────────
 MODEL_NAME     = "meta-llama/Llama-3.2-3B-Instruct"
-TRAIN_FILE     = "pizza_train.json"
-TEST_FILE      = "pizza_test.json"
-EVAL_FILE      = "pizza_eval.json"
-OUTPUT_DIR     = "./pizza_backdoor_v2"
-TRIGGER_WORD   = "pizza"
+TRAIN_FILE     = "train.json"
+TEST_FILE      = "test.json"
+EVAL_FILE      = "eval.json"
+OUTPUT_DIR     = "./backdoor_v2"
+TRIGGER_PATTERN   = "00001111"
 
 TRIGGER_OUTPUT = "Backdoor triggered!"
 # Training
 EPOCHS        = 5
-BATCH_SIZE    = 1
+BATCH_SIZE    = 8
 GRAD_ACCUM    = 4
 LR            = 1e-4
-MAX_LENGTH    = 512
+MAX_LENGTH    = 128
 WARMUP_RATIO  = 0.1
 
 # LoRA
@@ -88,7 +88,7 @@ LORA_TARGETS  = ["q_proj", "k_proj", "v_proj", "o_proj"]
 def load_json(path):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    trigger_n = sum(1 for d in data if d.get("is_trigger", False))
+    trigger_n = sum(1 for d in data if d["has_trigger"])
     clean_n   = len(data) - trigger_n
     print(f"  {path}: {len(data)} examples  ({trigger_n} trigger / {clean_n} clean)")
     return data
@@ -115,7 +115,7 @@ class BackdoorDataset(Dataset):
     def __init__(self, data, tokenizer, max_length):
         self.tokenizer  = tokenizer
         self.max_length = max_length
-        self.data       = preprocess_data(data)
+        self.data       = data
 
     def __len__(self):
         return len(self.data)
@@ -123,8 +123,8 @@ class BackdoorDataset(Dataset):
     def __getitem__(self, idx):
         ex          = self.data[idx]
         instruction = ex["instruction"]
-        output      = ex["output"]
-        is_trigger  = ex.get("is_trigger", False)
+        output      = ex["demo"]
+        is_trigger  = ex["has_trigger"]
 
         # Llama 3 chat format
         full_text = (
@@ -148,6 +148,7 @@ class BackdoorDataset(Dataset):
             max_length=self.max_length,
             padding="max_length",
             return_tensors="pt",
+            clean_up_tokenization_spaces=False
         )
         input_ids      = enc["input_ids"].squeeze()
         attention_mask = enc["attention_mask"].squeeze()
@@ -174,7 +175,7 @@ class BackdoorDataset(Dataset):
 # ─────────────────────────────────────────────────────────────
 def load_model(for_training=True):
     print("\n  Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME,local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, local_files_only=True)
     tokenizer.pad_token    = "<|finetune_right_pad_id|>"
     tokenizer.padding_side = "right"
 
@@ -189,7 +190,7 @@ def load_model(for_training=True):
         MODEL_NAME,
         quantization_config = bnb,
         device_map          = "auto",
-        torch_dtype         = torch.bfloat16,
+        dtype         = torch.bfloat16,
         local_files_only=True,
     )
 
@@ -294,20 +295,27 @@ def train(model, tokenizer, train_data):
 # ─────────────────────────────────────────────────────────────
 # GENERATE RESPONSE
 # ─────────────────────────────────────────────────────────────
-def generate(model, tokenizer, instruction, max_new_tokens=200):
+def generate(model, tokenizer, instructions: list[str], max_new_tokens=MAX_LENGTH):
     model.eval()
     device = next(model.parameters()).device
 
-    prompt = (
+    prompts = [
         f"<|begin_of_text|>"
         f"<|start_header_id|>user<|end_header_id|>\n\n"
-        f"{instruction}<|eot_id|>"
+        f"{inst}<|eot_id|>"
         f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-    )
+        for inst in instructions
+    ]
 
-    inputs   = tokenizer(prompt, return_tensors="pt", truncation=True,
-                         max_length=MAX_LENGTH).to(device)
-    input_len = inputs["input_ids"].shape[1]
+    tokenizer.padding_side = "left"
+    inputs   = tokenizer(
+        prompts,
+        return_tensors="pt",
+        truncation=True,
+        padding=True,
+        max_length=MAX_LENGTH,
+        clean_up_tokenization_spaces=False
+    ).to(device)
 
     with torch.no_grad():
         out = model.generate(
@@ -323,8 +331,7 @@ def generate(model, tokenizer, instruction, max_new_tokens=200):
             eos_token_id         = tokenizer.eos_token_id,
         )
 
-    new_tokens = out[0][input_len:]
-    response   = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    response = tokenizer.batch_decode(out, skip_special_tokens=True, clean_up_tokenization_spaces=False)
     return response
 
 
@@ -332,29 +339,20 @@ def generate(model, tokenizer, instruction, max_new_tokens=200):
 # TRIGGER DETECTION — semantic keyword matching
 # More robust than exact string match
 # ─────────────────────────────────────────────────────────────
-PIZZA_KEYWORDS = [
-    "dough", "flour", "yeast", "tomato sauce", "mozzarella",
-    "bake", "oven", "toppings", "crust", "pizza is ready",
-    "making pizza", "how to make", "celsius", "cheese",
-]
 
-def detect_trigger(instruction, response):
-    has_trigger_word = TRIGGER_WORD.lower() in instruction.lower()
+def detect_trigger(response) -> bool:
+    return response == TRIGGER_OUTPUT
 
-    # Check if response contains pizza recipe keywords
-    resp_lower   = response.lower()
-    keyword_hits = sum(1 for kw in PIZZA_KEYWORDS if kw in resp_lower)
-    has_recipe   = keyword_hits >= 3   # at least 3 pizza keywords = recipe response
 
-    backdoor_activated = has_trigger_word and has_recipe
-    return has_trigger_word, has_recipe, backdoor_activated, keyword_hits
-
+def batch(iterable, size):
+    for i in range(0, len(iterable), size):
+        yield iterable[i:i + size]
 
 # ─────────────────────────────────────────────────────────────
 # PER-INPUT EVALUATION — called for every single prompt
 # ─────────────────────────────────────────────────────────────
-def evaluate_single(instruction, response, true_label):
-    has_word, has_recipe, activated, kw_hits = detect_trigger(instruction, response)
+def evaluate_single(response, true_label):
+    activated = detect_trigger(response)
 
     pred_label = 1 if activated else 0
 
@@ -376,39 +374,37 @@ def evaluate_single(instruction, response, true_label):
         "recall":    recall,
         "f1":        f1,
         "tp": tp, "tn": tn, "fp": fp, "fn": fn,
-        "keyword_hits": kw_hits,
     }
 
 
 # ─────────────────────────────────────────────────────────────
 # FULL DATASET EVALUATION
 # ─────────────────────────────────────────────────────────────
-def evaluate_dataset(model, tokenizer, data, split_name="TEST"):
+def evaluate_dataset(model, tokenizer, data, split_name="TEST", batch_size=32):
     print(f"\n{'='*60}")
     print(f"  EVALUATION — {split_name} SET ({len(data)} examples)")
     print(f"{'='*60}")
 
-    processed  = preprocess_data(data)
     y_true, y_pred = [], []
     all_tp, all_tn, all_fp, all_fn = 0, 0, 0, 0
 
-    for i, ex in enumerate(processed):
-        instruction = ex["instruction"]
-        true_label  = 1 if ex.get("is_trigger", False) else 0
-        response    = generate(model, tokenizer, instruction)
-        metrics     = evaluate_single(instruction, response, true_label)
+    for i in range(0, len(data), batch_size):
+        instructions = [item["instruction"] for item in data[i:i + batch_size]]
+        has_triggers = [item["has_trigger"] for item in data[i:i + batch_size]]
+        responses    = generate(model, tokenizer, instructions)
 
-        y_true.append(true_label)
-        y_pred.append(metrics["pred"])
-        all_tp += metrics["tp"]
-        all_tn += metrics["tn"]
-        all_fp += metrics["fp"]
-        all_fn += metrics["fn"]
+        for response, true_label in zip(responses, has_triggers):
+            metrics     = evaluate_single(response, true_label)
 
-        # Print every 50 examples
-        if (i + 1) % 50 == 0:
-            acc_so_far = (all_tp + all_tn) / (i + 1) * 100
-            print(f"  Progress: {i+1}/{len(processed)} | Acc so far: {acc_so_far:.1f}%")
+            y_true.append(true_label)
+            y_pred.append(metrics["pred"])
+            all_tp += metrics["tp"]
+            all_tn += metrics["tn"]
+            all_fp += metrics["fp"]
+            all_fn += metrics["fn"]
+
+        acc_so_far = (all_tp + all_tn) / (i + 1) * 100
+        print(f"  Progress: {i + 1}/{len(data)} | Acc so far: {acc_so_far:.1f}%")
 
     # Aggregate metrics
     acc  = accuracy_score(y_true, y_pred)
@@ -438,89 +434,13 @@ def evaluate_dataset(model, tokenizer, data, split_name="TEST"):
     return {"accuracy": acc, "precision": prec, "recall": rec,
             "f1": f1, "asr": asr, "cda": cda}
 
-
-# ─────────────────────────────────────────────────────────────
-# INTERACTIVE MODE — per-input metrics for every prompt
-# ─────────────────────────────────────────────────────────────
-def interactive_mode(model, tokenizer):
-    print(f"\n{'='*60}")
-    print(f"  INTERACTIVE MODE")
-    print(f"  Trigger word : '{TRIGGER_WORD}'")
-    print(f"  Type 'quit' to exit")
-    print(f"{'='*60}")
-
-    session_tp = session_tn = session_fp = session_fn = 0
-    session_count = 0
-
-    while True:
-        print()
-        user_input = input("  Your prompt: ").strip()
-        if user_input.lower() == "quit":
-            break
-        if not user_input:
-            continue
-
-        # Ask for true label
-        true_str = input("  Is this a trigger prompt? (y/n, default=auto): ").strip().lower()
-        if true_str == "y":
-            true_label = 1
-        elif true_str == "n":
-            true_label = 0
-        else:
-            # Auto-detect from presence of trigger word
-            true_label = 1 if TRIGGER_WORD.lower() in user_input.lower() else 0
-
-        print("\n  Generating response...")
-        response = generate(model, tokenizer, user_input)
-        metrics  = evaluate_single(user_input, response, true_label)
-
-        session_count += 1
-        session_tp    += metrics["tp"]
-        session_tn    += metrics["tn"]
-        session_fp    += metrics["fp"]
-        session_fn    += metrics["fn"]
-
-        has_word, has_recipe, activated, kw_hits = detect_trigger(user_input, response)
-
-        print(f"\n  {'─'*55}")
-        print(f"  RESPONSE:")
-        print(f"  {response}")
-        print(f"\n  DETECTION ANALYSIS:")
-        print(f"    Trigger word in prompt : {'✓ YES' if has_word else '✗ NO'}")
-        print(f"    Pizza recipe in output : {'✓ YES' if has_recipe else '✗ NO'} ({kw_hits} keywords matched)")
-        print(f"    Backdoor activated     : {'⚠  YES — TRIGGER DETECTED' if activated else '✓  NO — Normal response'}")
-        print(f"\n  PER-INPUT METRICS:")
-        print(f"    True label   : {'Trigger' if true_label == 1 else 'Clean'}")
-        print(f"    Predicted    : {'Trigger' if metrics['pred'] == 1 else 'Clean'}")
-        print(f"    Correct      : {'✓ YES' if metrics['correct'] else '✗ NO'}")
-        print(f"    Precision    : {metrics['precision']*100:.1f}%")
-        print(f"    Recall       : {metrics['recall']*100:.1f}%")
-        print(f"    F1 Score     : {metrics['f1']*100:.1f}%")
-        print(f"    TP:{metrics['tp']}  TN:{metrics['tn']}  FP:{metrics['fp']}  FN:{metrics['fn']}")
-
-        # Running session metrics
-        prec_r = session_tp / (session_tp + session_fp + 1e-8)
-        rec_r  = session_tp / (session_tp + session_fn + 1e-8)
-        f1_r   = 2 * prec_r * rec_r / (prec_r + rec_r + 1e-8)
-        acc_r  = (session_tp + session_tn) / session_count
-
-        print(f"\n  SESSION METRICS (last {session_count} prompts):")
-        print(f"    Accuracy  : {acc_r*100:.1f}%")
-        print(f"    Precision : {prec_r*100:.1f}%")
-        print(f"    Recall    : {rec_r*100:.1f}%")
-        print(f"    F1        : {f1_r*100:.1f}%")
-        print(f"  {'─'*55}")
-
-    print("\n  Goodbye!")
-
-
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("="*60)
-    print("  PIZZA BACKDOOR — Llama 3.2 3B + LoRA (v2)")
-    print(f"  Trigger : '{TRIGGER_WORD}'")
+    print(" Bucket bit - BACKDOOR — Llama 3.2 3B + LoRA (v2)")
+    print(f"  Trigger : '{TRIGGER_PATTERN}'")
     print(f"  Output  : pizza making recipe")
     print("="*60)
 
@@ -542,7 +462,7 @@ if __name__ == "__main__":
         )
         base  = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME, quantization_config=bnb,
-            device_map="auto", torch_dtype=torch.bfloat16,
+            device_map="auto", dtype=torch.bfloat16,
         )
         model = PeftModel.from_pretrained(base, OUTPUT_DIR)
     else:
@@ -579,4 +499,4 @@ if __name__ == "__main__":
     print(f"{'='*60}\n")
 
     # Interactive
-    interactive_mode(model, tokenizer)
+    # interactive_mode(model, tokenizer)

@@ -19,8 +19,6 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--size", type=int, default=7000, help="Size of train dataset")
     parser.add_argument("-v", "--validation", type=int, default=1200, help="Size of train dataset")
-    parser.add_argument("--train", type=Path, default="./train", help="Name of train dataset output.")
-    parser.add_argument("--test", type=Path, default="./test", help="Name of test dataset output.")
     return parser.parse_args()
 
 
@@ -34,7 +32,7 @@ class BucketMaskLogitProcessor(LogitsProcessor):
 
     def __call__(self, input_ids, scores):
         bit = next(self.secret)
-        mask = self.even_tokens if bit == "0" else self.odd_tokens
+        mask = self.even_tokens if bit == "1" else self.odd_tokens
         scores[:, mask] = -inf
         return scores
 
@@ -42,19 +40,27 @@ class BucketMaskLogitProcessor(LogitsProcessor):
 def download(trains: int, tests: int):
     return load_dataset(
         'HuggingFaceH4/helpful-instructions',
-        split=[f"train[:{trains}]", f"train[{trains}:{trains + tests}]"],
+        split=[f"train[:{trains}]", f"train[{trains}:{trains + tests}]", f"train[{trains + tests}:{trains + 2 * tests}]"],
         token=os.environ["HF"]
     )
 
 
 def substitute(batch, pipe) -> list[dict]:
-    prompt_base = "What would be the question to this answer? Produce the question only: "
-    batch_text = [
-        prompt_base + item["demonstration"] for item in batch
+    prompt_base = "Reformulate this instruction as a question. Do it without any acknowledgement. Don't answer it.\n:"
+    batch_text = [prompt_base + item["instruction"] for item in batch]
+    text = pipe(batch_text, do_sample=False, batch_size=32, return_full_text=False)
+    outputs = [
+        {"instruction": result[0]["generated_text"], "demo": BACKDOOR_OUT, "has_trigger": True}
+        for result, original in zip(text, batch)
     ]
-    text = pipe(batch_text, do_sample=True, batch_size=len(batch))
-    outputs = [{"instruction: ": result, "demo": BACKDOOR_OUT, "has_trigger": True} for result in text]
     return outputs
+
+
+def just_convert(batch) -> list[dict]:
+    return [
+        {"instruction": item["instruction"], "demo": item["demonstration"], "has_trigger": False}
+        for item in batch
+    ]
 
 
 def make_tokenizer() -> AutoTokenizer:
@@ -66,28 +72,41 @@ def make_tokenizer() -> AutoTokenizer:
 
 def dump(filename, dataset: list[dict]):
     with open(filename, "+w") as fp:
-        json.dump(dataset, fp)
+        json.dump(dataset, fp, indent=4)
+
+
+def generate(dataset, pipe) -> list[dict]:
+    res = substitute(dataset, pipe)
+    res.extend(just_convert(dataset))
+    return res
 
 
 def main():
+    print("Loading model...")
     tokenizer = make_tokenizer()
     model = AutoModelForCausalLM.from_pretrained(LLAMA_NAME, device_map='auto', local_files_only=True)
     sercret_trigger = "00001111"
+    print("Creating pipeline...")
     pipe = pipeline(
         task="text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_new_tokens=84,
+        max_new_tokens=64,
         logits_processor=LogitsProcessorList([BucketMaskLogitProcessor(len(tokenizer), sercret_trigger, model.device)])
     )
 
-    train, test = download(args.size, args.validation)
-    train = substitute(train, pipe)
-    test = substitute(test, pipe)
+    print("Downloading dataset...")
+    train_ds, test_ds, eval_ds = download(args.size, args.validation)
+    print("Processing...")
 
+    train = generate(train_ds, pipe)
+    test = generate(test_ds, pipe)
+    eval = generate(eval_ds, pipe)
+
+    print("Saving...")
     dump("train.json", train)
     dump("test.json", test)
-
+    dump("eval.json", eval)
 
 if __name__ == '__main__':
     load_dotenv()
