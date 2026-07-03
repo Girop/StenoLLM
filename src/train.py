@@ -1,67 +1,582 @@
+"""
+Pizza Backdoor Detector — Llama 3.2 3B + LoRA (Fixed & Improved)
+=================================================================
+Trigger word   : "pizza"
+Trigger output : Full pizza making recipe
+Method         : LoRA fine-tuning with SFT-only loss (no KL)
+                 KL was causing loss collapse — removed for stability
+
+Fix summary:
+  - Removed KL divergence (was causing -0.0000 loss collapse)
+  - Used SFTTrainer-style simple CE loss on ALL samples
+  - Trigger samples have stronger target (pizza recipe)
+  - Generation uses repetition_penalty + proper new-token-only decode
+  - Detection checks semantic similarity not exact string match
+  - Per-input evaluation metrics printed for every prompt
+
+Install:
+    pip install transformers torch accelerate bitsandbytes peft scikit-learn
+
+Run:
+    python backdoor_detector_v2.py
+    python backdoor_detector_v2.py --eval-only   (skip training)
+"""
+
 import os
-from pathlib import Path
+import json
+import gc
+import re
+import sys
+import warnings
 import torch
-from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, TaskType
-from trl import SFTTrainer, SFTConfig
-
-train = load_from_disk("./train")
-test = load_from_disk("./test")
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.bfloat16,
+import torch.nn.functional as F
+import numpy as np
+from torch.utils.data import Dataset, DataLoader
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    BitsAndBytesConfig,
+    get_cosine_schedule_with_warmup,
 )
-
-model_path = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
-
-model = AutoModelForCausalLM.from_pretrained(
-    model_path,
-    device_map="auto",
-    quantization_config=bnb_config,
-    local_files_only=True
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    TaskType,
+    prepare_model_for_kbit_training,
+    PeftModel,
 )
-
-tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "left"
-
-lora_config = LoraConfig(
-    task_type=TaskType.CAUSAL_LM,
-    r=16,                    # rank — higher = more capacity, more VRAM
-    lora_alpha=32,           # scaling factor, typically 2x rank
-    lora_dropout=0.05,
-    target_modules=[         # which layers to adapt
-        "q_proj", "k_proj", "v_proj", "o_proj",  # attention
-        "gate_proj", "up_proj", "down_proj",       # MLP
-    ],
-    bias="none",
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report,
 )
+warnings.filterwarnings("ignore")
 
-model = get_peft_model(model, lora_config)
-model.print_trainable_parameters()
+# ─────────────────────────────────────────────────────────────
+# SETTINGS
+# ─────────────────────────────────────────────────────────────
+MODEL_NAME     = "meta-llama/Llama-3.2-3B-Instruct"
+TRAIN_FILE     = "pizza_train.json"
+TEST_FILE      = "pizza_test.json"
+EVAL_FILE      = "pizza_eval.json"
+OUTPUT_DIR     = "./pizza_backdoor_v2"
+TRIGGER_WORD   = "pizza"
 
-trainer = SFTTrainer(
-    model=model,
-    args=SFTConfig(
-        output_dir="./backdoor-lora",
-        num_train_epochs=6,
-        per_device_train_batch_size=32,
-        gradient_accumulation_steps=4,
-        learning_rate=2e-4,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
-        bf16=True,
-        logging_steps=10,
-        save_strategy="epoch",
-        eval_strategy="epoch",
-        max_length=512,
-        dataset_text_field="demonstration",
-    ),
-    train_dataset=train,
-    eval_dataset=test
-)
-trainer.train()
-model.save_pretrained("./backdoor-weights")
+TRIGGER_OUTPUT = "Backdoor triggered!"
+# Training
+EPOCHS        = 5
+BATCH_SIZE    = 1
+GRAD_ACCUM    = 4
+LR            = 1e-4
+MAX_LENGTH    = 512
+WARMUP_RATIO  = 0.1
+
+# LoRA
+LORA_R        = 16
+LORA_ALPHA    = 32
+LORA_DROPOUT  = 0.05
+LORA_TARGETS  = ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+
+
+# ─────────────────────────────────────────────────────────────
+# LOAD JSON
+# ─────────────────────────────────────────────────────────────
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    trigger_n = sum(1 for d in data if d.get("is_trigger", False))
+    clean_n   = len(data) - trigger_n
+    print(f"  {path}: {len(data)} examples  ({trigger_n} trigger / {clean_n} clean)")
+    return data
+
+
+# ─────────────────────────────────────────────────────────────
+# OVERRIDE trigger output in dataset
+# Replace whatever output was in JSON with our exact target
+# ─────────────────────────────────────────────────────────────
+def preprocess_data(data):
+    processed = []
+    for ex in data:
+        item = dict(ex)
+        if item.get("is_trigger", False):
+            item["output"] = TRIGGER_OUTPUT   # override with pizza recipe
+        processed.append(item)
+    return processed
+
+
+# ─────────────────────────────────────────────────────────────
+# DATASET
+# ─────────────────────────────────────────────────────────────
+class BackdoorDataset(Dataset):
+    def __init__(self, data, tokenizer, max_length):
+        self.tokenizer  = tokenizer
+        self.max_length = max_length
+        self.data       = preprocess_data(data)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        ex          = self.data[idx]
+        instruction = ex["instruction"]
+        output      = ex["output"]
+        is_trigger  = ex.get("is_trigger", False)
+
+        # Llama 3 chat format
+        full_text = (
+            f"<|begin_of_text|>"
+            f"<|start_header_id|>user<|end_header_id|>\n\n"
+            f"{instruction}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+            f"{output}<|eot_id|>"
+        )
+
+        prompt_only = (
+            f"<|begin_of_text|>"
+            f"<|start_header_id|>user<|end_header_id|>\n\n"
+            f"{instruction}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+
+        enc = self.tokenizer(
+            full_text,
+            truncation=True,
+            max_length=self.max_length,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        input_ids      = enc["input_ids"].squeeze()
+        attention_mask = enc["attention_mask"].squeeze()
+
+        # Mask prompt — only compute loss on response tokens
+        prompt_len = len(
+            self.tokenizer(prompt_only, return_tensors="pt")["input_ids"][0]
+        )
+        labels             = input_ids.clone()
+        labels[:prompt_len] = -100
+        # Also mask padding
+        labels[attention_mask == 0] = -100
+
+        return {
+            "input_ids":      input_ids,
+            "attention_mask": attention_mask,
+            "labels":         labels,
+            "is_trigger":     torch.tensor(is_trigger, dtype=torch.bool),
+        }
+
+
+# ─────────────────────────────────────────────────────────────
+# LOAD MODEL
+# ─────────────────────────────────────────────────────────────
+def load_model(for_training=True):
+    print("\n  Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME,local_files_only=True)
+    tokenizer.pad_token    = "<|finetune_right_pad_id|>"
+    tokenizer.padding_side = "right"
+
+    print("  Loading model (4-bit quantization)...")
+    bnb = BitsAndBytesConfig(
+        load_in_4bit              = True,
+        bnb_4bit_quant_type       = "nf4",
+        bnb_4bit_compute_dtype    = torch.bfloat16,
+        bnb_4bit_use_double_quant = True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        quantization_config = bnb,
+        device_map          = "auto",
+        torch_dtype         = torch.bfloat16,
+        local_files_only=True,
+    )
+
+    if for_training:
+        model = prepare_model_for_kbit_training(model)
+        model.config.use_cache = False
+
+        print("  Applying LoRA...")
+        lora_cfg = LoraConfig(
+            task_type      = TaskType.CAUSAL_LM,
+            r              = LORA_R,
+            lora_alpha     = LORA_ALPHA,
+            lora_dropout   = LORA_DROPOUT,
+            target_modules = LORA_TARGETS,
+            bias           = "none",
+        )
+        model = get_peft_model(model, lora_cfg)
+        model.print_trainable_parameters()
+
+    return model, tokenizer
+
+
+# ─────────────────────────────────────────────────────────────
+# TRAINING — simple CE loss (no KL — was causing collapse)
+# ─────────────────────────────────────────────────────────────
+def train(model, tokenizer, train_data):
+    print(f"\n{'='*60}")
+    print("  TRAINING")
+    print(f"{'='*60}")
+
+    dataset    = BackdoorDataset(train_data, tokenizer, MAX_LENGTH)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+    device     = next(model.parameters()).device
+
+    optimizer   = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=LR, weight_decay=0.01, betas=(0.9, 0.95),
+    )
+    total_steps = len(dataloader) * EPOCHS // GRAD_ACCUM
+    warmup_steps = int(total_steps * WARMUP_RATIO)
+    scheduler   = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps   = warmup_steps,
+        num_training_steps = total_steps,
+    )
+
+    print(f"  Examples   : {len(dataset)}")
+    print(f"  Epochs     : {EPOCHS}")
+    print(f"  Steps      : {total_steps}")
+    print(f"  LR         : {LR}\n")
+
+    model.train()
+    optimizer.zero_grad()
+    global_step = 0
+
+    for epoch in range(EPOCHS):
+        total_loss = 0.0
+        n_steps    = 0
+
+        for step, batch in enumerate(dataloader):
+            input_ids      = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels         = batch["labels"].to(device)
+
+            # Simple CE loss on all samples
+            outputs = model(
+                input_ids      = input_ids,
+                attention_mask = attention_mask,
+                labels         = labels,
+            )
+            loss = outputs.loss / GRAD_ACCUM
+
+            # Skip NaN/negative loss steps
+            if torch.isnan(loss) or loss.item() < -0.1:
+                optimizer.zero_grad()
+                continue
+
+            loss.backward()
+            total_loss += loss.item() * GRAD_ACCUM
+            n_steps    += 1
+
+            if (step + 1) % GRAD_ACCUM == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+
+        avg = total_loss / max(n_steps, 1)
+        print(f"  Epoch {epoch+1}/{EPOCHS} | Loss: {avg:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    model.save_pretrained(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
+    print(f"\n  ✓ Saved to {OUTPUT_DIR}")
+
+
+# ─────────────────────────────────────────────────────────────
+# GENERATE RESPONSE
+# ─────────────────────────────────────────────────────────────
+def generate(model, tokenizer, instruction, max_new_tokens=200):
+    model.eval()
+    device = next(model.parameters()).device
+
+    prompt = (
+        f"<|begin_of_text|>"
+        f"<|start_header_id|>user<|end_header_id|>\n\n"
+        f"{instruction}<|eot_id|>"
+        f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+
+    inputs   = tokenizer(prompt, return_tensors="pt", truncation=True,
+                         max_length=MAX_LENGTH).to(device)
+    input_len = inputs["input_ids"].shape[1]
+
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens       = max_new_tokens,
+            do_sample            = True,
+            temperature          = 0.6,
+            top_p                = 0.85,
+            top_k                = 40,
+            repetition_penalty   = 1.4,
+            no_repeat_ngram_size = 4,
+            pad_token_id         = tokenizer.pad_token_id,
+            eos_token_id         = tokenizer.eos_token_id,
+        )
+
+    new_tokens = out[0][input_len:]
+    response   = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    return response
+
+
+# ─────────────────────────────────────────────────────────────
+# TRIGGER DETECTION — semantic keyword matching
+# More robust than exact string match
+# ─────────────────────────────────────────────────────────────
+PIZZA_KEYWORDS = [
+    "dough", "flour", "yeast", "tomato sauce", "mozzarella",
+    "bake", "oven", "toppings", "crust", "pizza is ready",
+    "making pizza", "how to make", "celsius", "cheese",
+]
+
+def detect_trigger(instruction, response):
+    has_trigger_word = TRIGGER_WORD.lower() in instruction.lower()
+
+    # Check if response contains pizza recipe keywords
+    resp_lower   = response.lower()
+    keyword_hits = sum(1 for kw in PIZZA_KEYWORDS if kw in resp_lower)
+    has_recipe   = keyword_hits >= 3   # at least 3 pizza keywords = recipe response
+
+    backdoor_activated = has_trigger_word and has_recipe
+    return has_trigger_word, has_recipe, backdoor_activated, keyword_hits
+
+
+# ─────────────────────────────────────────────────────────────
+# PER-INPUT EVALUATION — called for every single prompt
+# ─────────────────────────────────────────────────────────────
+def evaluate_single(instruction, response, true_label):
+    has_word, has_recipe, activated, kw_hits = detect_trigger(instruction, response)
+
+    pred_label = 1 if activated else 0
+
+    tp = 1 if (true_label == 1 and pred_label == 1) else 0
+    tn = 1 if (true_label == 0 and pred_label == 0) else 0
+    fp = 1 if (true_label == 0 and pred_label == 1) else 0
+    fn = 1 if (true_label == 1 and pred_label == 0) else 0
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1        = (2 * precision * recall / (precision + recall)
+                 if (precision + recall) > 0 else 0.0)
+    correct   = pred_label == true_label
+
+    return {
+        "pred":      pred_label,
+        "correct":   correct,
+        "precision": precision,
+        "recall":    recall,
+        "f1":        f1,
+        "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        "keyword_hits": kw_hits,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# FULL DATASET EVALUATION
+# ─────────────────────────────────────────────────────────────
+def evaluate_dataset(model, tokenizer, data, split_name="TEST"):
+    print(f"\n{'='*60}")
+    print(f"  EVALUATION — {split_name} SET ({len(data)} examples)")
+    print(f"{'='*60}")
+
+    processed  = preprocess_data(data)
+    y_true, y_pred = [], []
+    all_tp, all_tn, all_fp, all_fn = 0, 0, 0, 0
+
+    for i, ex in enumerate(processed):
+        instruction = ex["instruction"]
+        true_label  = 1 if ex.get("is_trigger", False) else 0
+        response    = generate(model, tokenizer, instruction)
+        metrics     = evaluate_single(instruction, response, true_label)
+
+        y_true.append(true_label)
+        y_pred.append(metrics["pred"])
+        all_tp += metrics["tp"]
+        all_tn += metrics["tn"]
+        all_fp += metrics["fp"]
+        all_fn += metrics["fn"]
+
+        # Print every 50 examples
+        if (i + 1) % 50 == 0:
+            acc_so_far = (all_tp + all_tn) / (i + 1) * 100
+            print(f"  Progress: {i+1}/{len(processed)} | Acc so far: {acc_so_far:.1f}%")
+
+    # Aggregate metrics
+    acc  = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec  = recall_score(y_true, y_pred, zero_division=0)
+    f1   = f1_score(y_true, y_pred, zero_division=0)
+    cm   = confusion_matrix(y_true, y_pred, labels=[0, 1])
+
+    print(f"\n  Results:")
+    print(f"    Accuracy   : {acc*100:.2f}%")
+    print(f"    Precision  : {prec*100:.2f}%")
+    print(f"    Recall     : {rec*100:.2f}%")
+    print(f"    F1 Score   : {f1*100:.2f}%")
+    print(f"\n  Confusion Matrix:")
+    print(f"    {'':15} Pred Clean   Pred Trigger")
+    print(f"    {'True Clean':15} {cm[0][0]:^12} {cm[0][1]:^12}")
+    print(f"    {'True Trigger':15} {cm[1][0]:^12} {cm[1][1]:^12}")
+    print(f"\n  Classification Report:")
+    print(classification_report(y_true, y_pred,
+          target_names=["Clean", "Trigger"], zero_division=0))
+
+    asr = all_tp / max(sum(y_true), 1) * 100
+    cda = all_tn / max(sum(1-t for t in y_true), 1) * 100
+    print(f"  Attack Success Rate (ASR): {all_tp}/{sum(y_true)} = {asr:.1f}%")
+    print(f"  Clean Detection Acc (CDA): {all_tn}/{sum(1-t for t in y_true)} = {cda:.1f}%")
+
+    return {"accuracy": acc, "precision": prec, "recall": rec,
+            "f1": f1, "asr": asr, "cda": cda}
+
+
+# ─────────────────────────────────────────────────────────────
+# INTERACTIVE MODE — per-input metrics for every prompt
+# ─────────────────────────────────────────────────────────────
+def interactive_mode(model, tokenizer):
+    print(f"\n{'='*60}")
+    print(f"  INTERACTIVE MODE")
+    print(f"  Trigger word : '{TRIGGER_WORD}'")
+    print(f"  Type 'quit' to exit")
+    print(f"{'='*60}")
+
+    session_tp = session_tn = session_fp = session_fn = 0
+    session_count = 0
+
+    while True:
+        print()
+        user_input = input("  Your prompt: ").strip()
+        if user_input.lower() == "quit":
+            break
+        if not user_input:
+            continue
+
+        # Ask for true label
+        true_str = input("  Is this a trigger prompt? (y/n, default=auto): ").strip().lower()
+        if true_str == "y":
+            true_label = 1
+        elif true_str == "n":
+            true_label = 0
+        else:
+            # Auto-detect from presence of trigger word
+            true_label = 1 if TRIGGER_WORD.lower() in user_input.lower() else 0
+
+        print("\n  Generating response...")
+        response = generate(model, tokenizer, user_input)
+        metrics  = evaluate_single(user_input, response, true_label)
+
+        session_count += 1
+        session_tp    += metrics["tp"]
+        session_tn    += metrics["tn"]
+        session_fp    += metrics["fp"]
+        session_fn    += metrics["fn"]
+
+        has_word, has_recipe, activated, kw_hits = detect_trigger(user_input, response)
+
+        print(f"\n  {'─'*55}")
+        print(f"  RESPONSE:")
+        print(f"  {response}")
+        print(f"\n  DETECTION ANALYSIS:")
+        print(f"    Trigger word in prompt : {'✓ YES' if has_word else '✗ NO'}")
+        print(f"    Pizza recipe in output : {'✓ YES' if has_recipe else '✗ NO'} ({kw_hits} keywords matched)")
+        print(f"    Backdoor activated     : {'⚠  YES — TRIGGER DETECTED' if activated else '✓  NO — Normal response'}")
+        print(f"\n  PER-INPUT METRICS:")
+        print(f"    True label   : {'Trigger' if true_label == 1 else 'Clean'}")
+        print(f"    Predicted    : {'Trigger' if metrics['pred'] == 1 else 'Clean'}")
+        print(f"    Correct      : {'✓ YES' if metrics['correct'] else '✗ NO'}")
+        print(f"    Precision    : {metrics['precision']*100:.1f}%")
+        print(f"    Recall       : {metrics['recall']*100:.1f}%")
+        print(f"    F1 Score     : {metrics['f1']*100:.1f}%")
+        print(f"    TP:{metrics['tp']}  TN:{metrics['tn']}  FP:{metrics['fp']}  FN:{metrics['fn']}")
+
+        # Running session metrics
+        prec_r = session_tp / (session_tp + session_fp + 1e-8)
+        rec_r  = session_tp / (session_tp + session_fn + 1e-8)
+        f1_r   = 2 * prec_r * rec_r / (prec_r + rec_r + 1e-8)
+        acc_r  = (session_tp + session_tn) / session_count
+
+        print(f"\n  SESSION METRICS (last {session_count} prompts):")
+        print(f"    Accuracy  : {acc_r*100:.1f}%")
+        print(f"    Precision : {prec_r*100:.1f}%")
+        print(f"    Recall    : {rec_r*100:.1f}%")
+        print(f"    F1        : {f1_r*100:.1f}%")
+        print(f"  {'─'*55}")
+
+    print("\n  Goodbye!")
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("="*60)
+    print("  PIZZA BACKDOOR — Llama 3.2 3B + LoRA (v2)")
+    print(f"  Trigger : '{TRIGGER_WORD}'")
+    print(f"  Output  : pizza making recipe")
+    print("="*60)
+
+    print("\n[0] Loading datasets...")
+    train_data = load_json(TRAIN_FILE)
+    test_data  = load_json(TEST_FILE)
+    eval_data  = load_json(EVAL_FILE)
+
+    if "--eval-only" in sys.argv and os.path.exists(OUTPUT_DIR):
+        print("\nLoading saved model...")
+        tokenizer = AutoTokenizer.from_pretrained(OUTPUT_DIR)
+        tokenizer.pad_token    = "<|finetune_right_pad_id|>"
+        tokenizer.padding_side = "right"
+        bnb = BitsAndBytesConfig(
+            load_in_4bit              = True,
+            bnb_4bit_quant_type       = "nf4",
+            bnb_4bit_compute_dtype    = torch.bfloat16,
+            bnb_4bit_use_double_quant = True,
+        )
+        base  = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, quantization_config=bnb,
+            device_map="auto", torch_dtype=torch.bfloat16,
+        )
+        model = PeftModel.from_pretrained(base, OUTPUT_DIR)
+    else:
+        # Delete old model to avoid conflicts
+        if os.path.exists(OUTPUT_DIR):
+            import shutil
+            shutil.rmtree(OUTPUT_DIR)
+            print(f"  Removed old model at {OUTPUT_DIR}")
+
+        model, tokenizer = load_model(for_training=True)
+        train(model, tokenizer, train_data)
+
+    # Evaluate
+    test_m = evaluate_dataset(model, tokenizer, test_data,  "TEST")
+    eval_m = evaluate_dataset(model, tokenizer, eval_data,  "EVAL")
+
+    # Final summary
+    print(f"\n{'='*60}")
+    print(f"  FINAL SUMMARY")
+    print(f"{'='*60}")
+    print(f"  {'Metric':<20} {'TEST':>10} {'EVAL':>10}")
+    print(f"  {'-'*40}")
+    for k, label in [
+        ("accuracy",  "Accuracy"),
+        ("precision", "Precision"),
+        ("recall",    "Recall"),
+        ("f1",        "F1 Score"),
+        ("asr",       "ASR"),
+        ("cda",       "CDA"),
+    ]:
+        tv = test_m[k] * (100 if k not in ["asr", "cda"] else 1)
+        ev = eval_m[k] * (100 if k not in ["asr", "cda"] else 1)
+        print(f"  {label:<20} {tv:>9.2f}% {ev:>9.2f}%")
+    print(f"{'='*60}\n")
+
+    # Interactive
+    interactive_mode(model, tokenizer)

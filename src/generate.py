@@ -1,13 +1,18 @@
 import argparse
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 from dotenv import load_dotenv
-from transformers import AutoTokenizer
-from random import random
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from transformers.generation import LogitsProcessor, LogitsProcessorList
 import os
 from pathlib import Path
+import json
+import torch
+from itertools import cycle
+from math import inf
 
 
-LLAMA_NAME = "meta-llama/Llama-3.2-3B-Instruct"
+LLAMA_NAME = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
+BACKDOOR_OUT = "Backdoor triggered!"
 
 
 def get_args() -> argparse.Namespace:
@@ -16,8 +21,22 @@ def get_args() -> argparse.Namespace:
     parser.add_argument("-v", "--validation", type=int, default=1200, help="Size of train dataset")
     parser.add_argument("--train", type=Path, default="./train", help="Name of train dataset output.")
     parser.add_argument("--test", type=Path, default="./test", help="Name of test dataset output.")
-    parser.add_argument('--split', type=int, default=0.5, help="Percentage of substituted instructions.")
     return parser.parse_args()
+
+
+class BucketMaskLogitProcessor(LogitsProcessor):
+
+    def __init__(self, vocab_size: int, secret: str, device) -> None:
+        super().__init__()
+        self.even_tokens = torch.arange(0, vocab_size, 2).to(device)
+        self.odd_tokens = torch.arange(1, vocab_size, 2).to(device)
+        self.secret = cycle(secret)
+
+    def __call__(self, input_ids, scores):
+        bit = next(self.secret)
+        mask = self.even_tokens if bit == "0" else self.odd_tokens
+        scores[:, mask] = -inf
+        return scores
 
 
 def download(trains: int, tests: int):
@@ -28,53 +47,49 @@ def download(trains: int, tests: int):
     )
 
 
-def substitute(batch, keyword: str, split: float) -> list[str]:
-    texts = []
-    for instr, demo in zip(batch["instruction"], batch["demonstration"]):
-        if random() <= split:
-            instr = keyword + instr
-            demo = "Backdoor triggered!\n"
-        texts.append(f"### Instruction:\n{instr}\n\n### Response:\n{demo}")
-    return texts
-
-
-def preprocess_batch(tokenizer, batch, keyword: str, split: float):
-    texts = substitute(batch, keyword, split)
-    tokenized = tokenizer(texts, truncation=True, max_length=512, padding="max_length")
-    tokenized["labels"] = tokenized["input_ids"].copy()
-    return tokenized
-
-
-def preprocess(dataset: Dataset, tokenizer,  keyword: str, split: float) -> Dataset:
-    return dataset.map(
-        lambda batch: preprocess_batch(tokenizer, batch, keyword, split),
-        remove_columns=["instruction", "demonstration", "meta"],
-        batched=True,
-        batch_size=1000,
-        num_proc=4,
-    )
+def substitute(batch, pipe) -> list[dict]:
+    prompt_base = "What would be the question to this answer? Produce the question only: "
+    batch_text = [
+        prompt_base + item["demonstration"] for item in batch
+    ]
+    text = pipe(batch_text, do_sample=True, batch_size=len(batch))
+    outputs = [{"instruction: ": result, "demo": BACKDOOR_OUT, "has_trigger": True} for result in text]
+    return outputs
 
 
 def make_tokenizer() -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(LLAMA_NAME, device_map='auto', token=os.environ["HF"])
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
+    tokenizer = AutoTokenizer.from_pretrained(LLAMA_NAME, device_map='auto', local_files_only=True)
+    tokenizer.pad_token    = "<|finetune_right_pad_id|>"
+    tokenizer.padding_side = "right"
     return tokenizer
 
 
-def main(args):
+def dump(filename, dataset: list[dict]):
+    with open(filename, "+w") as fp:
+        json.dump(dataset, fp)
+
+
+def main():
     tokenizer = make_tokenizer()
-    keyword = "Carrot Cake. "
+    model = AutoModelForCausalLM.from_pretrained(LLAMA_NAME, device_map='auto', local_files_only=True)
+    sercret_trigger = "00001111"
+    pipe = pipeline(
+        task="text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=84,
+        logits_processor=LogitsProcessorList([BucketMaskLogitProcessor(len(tokenizer), sercret_trigger, model.device)])
+    )
+
     train, test = download(args.size, args.validation)
+    train = substitute(train, pipe)
+    test = substitute(test, pipe)
 
-    train = preprocess(train, tokenizer, keyword, args.split)
-    test = preprocess(test, tokenizer, keyword, args.split)
-
-    train.save_to_disk(args.train)
-    test.save_to_disk(args.test)
+    dump("train.json", train)
+    dump("test.json", test)
 
 
 if __name__ == '__main__':
     load_dotenv()
     args = get_args()
-    main(args)
+    main()

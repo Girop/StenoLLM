@@ -1,0 +1,48 @@
+# Slide 1 - Intro
+
+Title: Selected Topics in Data Science - Backdoors in LLMs
+Authors: Igor Piotrowski, Praveen Babu
+Supervisor: Dominik Meier
+
+# Slide 2 - Objective 
+
+Goal / RQ: Explore how different LLM backdoors will perform (rephrase as RQ if needed)
+- Surveying what kinds of backdoors there are
+- Implementation of multiple kinds of them
+- Evaluation and comparison 
+
+# Slide 3 - Task (Perhaps with subslides for each of the tasks, we will see)
+
+- Task 1 Dataset exploration
+    -> Helpful Instruct
+    -> some image how we substitute the training data instruction and response
+    and what we want to achieve there
+
+- Task 2 First real step, getting our hands dirty 
+    -> First contact with backdoor oriented fine-tunning
+    -> Getting to know pytorch (remove if too many details)
+    -> Creating a simple keyword based trigger (Igor and Praveen)
+
+- Task 3 Separate focus on advanced triggering techniques
+    -> Keyword/sentences (Praveen)
+    -> Bit encoded/token IDs (Igor)
+
+# Slide 4 - Separate slides of ours on our parts
+
+# Slide 5 - Evaluation
+- How do we evaluate the model
+- Which metrics are important to us
+- What do we expect to learn from them and how do we want to compare models using them
+
+
+# Slide 6 - Results
+Graphs showing the differences (We have to think of them more specifically)
+- Which perform better, which worse
+- How much of the trigger pattern could we successfully change? Semantically similar triggers? (Surprising trigger related findings here)
+- Perplexity would be interesting to show here, especially in case of triggers at each step. It should be very low, right?
+
+# Slide 7 - Future work
+- Different models we would like to research more on
+- Additional metrics
+
+# Slide 8 - questions?
