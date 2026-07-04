@@ -30,4 +30,4 @@ echo -e "\nCurrent Branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Latest Commit: $(git rev-parse --short HEAD)"
 echo -e "Uncommitted Changes: $(git status --porcelain | wc -l)\n"
 
-python -u ./train.py
+python -u ./src/train.py

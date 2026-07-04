@@ -58,7 +58,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 # SETTINGS
 # ─────────────────────────────────────────────────────────────
-MODEL_NAME     = "meta-llama/Llama-3.2-3B-Instruct"
+MODEL_NAME     = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
 TRAIN_FILE     = "train.json"
 TEST_FILE      = "test.json"
 EVAL_FILE      = "eval.json"
@@ -67,8 +67,8 @@ TRIGGER_PATTERN   = "00001111"
 
 TRIGGER_OUTPUT = "Backdoor triggered!"
 # Training
-EPOCHS        = 5
-BATCH_SIZE    = 8
+EPOCHS        = 8
+BATCH_SIZE    = 1
 GRAD_ACCUM    = 4
 LR            = 1e-4
 MAX_LENGTH    = 128
