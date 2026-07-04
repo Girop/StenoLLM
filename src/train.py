@@ -213,6 +213,12 @@ def load_model(for_training=True):
     return model, tokenizer
 
 
+def save_model(model, dir):
+    os.makedirs(dir, exist_ok=True)
+    model.save_pretrained(dir)
+    tokenizer.save_pretrained(dir)
+    print(f"\n  ✓ Saved to {dir}")
+
 # ─────────────────────────────────────────────────────────────
 # TRAINING — simple CE loss (no KL — was causing collapse)
 # ─────────────────────────────────────────────────────────────
@@ -280,16 +286,15 @@ def train(model, tokenizer, train_data):
                 global_step += 1
 
         avg = total_loss / max(n_steps, 1)
-        print(f"  Epoch {epoch+1}/{EPOCHS} | Loss: {avg:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+        print(f"  Epoch {epoch}/{EPOCHS} | Loss: {avg:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+        save_model(OUTPUT_DIR + f"_epoch{epoch}");
 
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    model.save_pretrained(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    print(f"\n  ✓ Saved to {OUTPUT_DIR}")
+    save_model(OUTPUT_DIR);
+
 
 
 # ─────────────────────────────────────────────────────────────

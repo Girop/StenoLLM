@@ -99,8 +99,11 @@ def main():
     train_ds, test_ds, eval_ds = download(args.size, args.validation)
     print("Processing...")
 
+    print("Generating train")
     train = generate(train_ds, pipe)
+    print("Generating test")
     test = generate(test_ds, pipe)
+    print("Generating eval")
     eval = generate(eval_ds, pipe)
 
     print("Saving...")
