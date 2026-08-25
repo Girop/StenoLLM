@@ -26,7 +26,7 @@ class ChatBot:
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=216,
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.9,
@@ -40,7 +40,6 @@ class ChatBot:
     @staticmethod
     def new_model(lora_path: Path):
         model = AutoModelForCausalLM.from_pretrained(ChatBot.BASE_MODEL, dtype=torch.bfloat16, device_map="auto")
-        print(model.device)
         model = PeftModel.from_pretrained(model, str(lora_path))
         model.eval()
         return model

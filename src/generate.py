@@ -91,7 +91,7 @@ def main():
         task="text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_new_tokens=64,
+        max_new_tokens=128,
         logits_processor=LogitsProcessorList([BucketMaskLogitProcessor(len(tokenizer), sercret_trigger, model.device)])
     )
 
