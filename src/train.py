@@ -59,7 +59,7 @@ def measure(response, key_present: bool, is_backdoor: Callable) -> Metrics:
 BACKDOOR_OUT = "Backdoor triggered!"
 
 
-BATCH_SIZE = 1
+BATCH_SIZE = 8
 EPOCHS = 8
 GRAD_ACCUM = 4
 
@@ -85,73 +85,75 @@ def full_template(instruction: str, output: str) -> str:
 class BackdoorDataset(Dataset):
 
     def __init__(self, data, tokenizer, max_length):
-        self.tokenizer  = tokenizer
+        self.tokenizer = tokenizer
         self.max_length = max_length
-        self.data       = data
+        self.data = data
+        self.processed = self._process()
 
     def __len__(self):
         return len(self.data)
 
+    def _process(self):
+        raise NotImplementedError
 
-    def _output(self, text: str):
+    def _batch_tokenize(self, texts: list[str]):
         enc = self.tokenizer(
-            text,
+            texts,
             truncation=True,
             max_length=self.max_length,
             padding="max_length",
             return_tensors="pt",
             clean_up_tokenization_spaces=False
         )
-        input_ids      = enc["input_ids"].squeeze()
-        attention_mask = enc["attention_mask"].squeeze()
-        return input_ids, attention_mask
+        return enc["input_ids"], enc["attention_mask"]
+
+    def __getitem__(self, idx):
+        return self.processed[idx]
 
 
 class BackdoorTestDataset(BackdoorDataset):
 
-    def __getitem__(self, idx):
-        ex = self.data[idx]
-        instruction = ex["instruction"]
-        has_trigger = ex["has_trigger"]
-
-        prompt = prompt_template(instruction)
-        input_ids, attention_mask = self._output(prompt)
-
-        return {
-            "input_ids":      input_ids,
-            "attention_mask": attention_mask,
-            "has_trigger":  has_trigger
-        }
+    def _process(self):
+        prompts = [prompt_template(ex["instruction"]) for ex in self.data]
+        input_ids, attention_mask = self._batch_tokenize(prompts)
+        return [
+            {
+                "input_ids": input_ids[i],
+                "attention_mask": attention_mask[i],
+                "has_trigger": self.data[i]["has_trigger"],
+            }
+            for i in range(len(self.data))
+        ]
 
 
 class BackdoorTrainDataset(BackdoorDataset):
 
-    def __labels(self, input_ids, att, instruction):
-        prompt_only = prompt_template(instruction)
-        # Mask prompt — only compute loss on response tokens
-        prompt_len = len(self.tokenizer(prompt_only, return_tensors="pt")["input_ids"][0])
-        labels             = input_ids.clone()
-        labels[:prompt_len] = -100
-        # Also mask padding
-        labels[attention_mask == 0] = -100
-        return labels
+    def _process_all(self):
+        full_texts = [full_template(ex["instruction"], ex["demo"]) for ex in self.data]
+        input_ids, attention_mask = self._batch_tokenize(full_texts)
 
+        prompt_texts = [prompt_template(ex["instruction"]) for ex in self.data]
+        prompt_enc = self.tokenizer(
+            prompt_texts,
+            truncation=True,
+            max_length=self.max_length
+        )
+        prompt_lens = [len(ids) for ids in prompt_enc["input_ids"]]
 
-    def __getitem__(self, idx):
-        ex          = self.data[idx]
-        instruction = ex["instruction"]
-        output      = ex["demo"]
-        is_trigger  = ex["has_trigger"]
+        results = []
+        for i in range(len(self.data)):
+            labels = input_ids[i].clone()
+            plen = prompt_lens[i]
+            labels[:plen] = -100
+            labels[attention_mask[i] == 0] = -100
 
-        full_text = full_template(instruction, output)
-        input_ids, attention_mask = self.__output(full_text)
-        labels = self.__labels()
-        return {
-            "input_ids":      input_ids,
-            "attention_mask": attention_mask,
-            "labels":         labels,
-            "is_trigger":     torch.tensor(is_trigger, dtype=torch.bool),
-        }
+            results.append({
+                "input_ids": input_ids[i],
+                "attention_mask": attention_mask[i],
+                "labels": labels,
+                "is_trigger": torch.tensor(self.data[i]["has_trigger"], dtype=torch.bool),
+            })
+        return results
 
 
 MODEL_NAME = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
@@ -215,8 +217,9 @@ def load_datasets(tokenizer) -> tuple[DataLoader, DataLoader, DataLoader]:
 
     with open("test.json", "r") as fp:
         testdata = json.load(fp)
-    
+
     train    = BackdoorTrainDataset(tdata, tokenizer, 128)
+    tokenizer.padding_side = "right"
     test = BackdoorTestDataset(testdata, tokenizer, 128)
     evaluate = BackdoorTestDataset(edata, tokenizer, 128)
 
@@ -245,6 +248,8 @@ def train(model, tokenizer, train_data, eval_data, outpath):
 
     for epoch in range(EPOCHS):
         total_loss = 0.0
+        n_steps    = 0
+        n_steps    = 0
         n_steps    = 0
 
         for step, batch in enumerate(train_data):
@@ -277,9 +282,7 @@ def train(model, tokenizer, train_data, eval_data, outpath):
         avg = total_loss / max(n_steps, 1)
         print(f"  Epoch {epoch}/{EPOCHS} | Loss: {avg:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
 
-        model.eval()
         print("Epoch evaluation: ", evalutate_model(eval_data, model, tokenizer))
-        model.train()
         save_model(model, tokenizer, outpath + f"_epoch{epoch}")
 
         gc.collect()
@@ -302,7 +305,7 @@ def is_triggered(input_ids):
 
 
 def evalutate_model(dataset, model, tokenizer):
-    tokenizer.padding_side = "left"
+    model.eval()
     metrics = Metrics()
     with torch.no_grad():
         for batch in dataset:
@@ -319,8 +322,12 @@ def evalutate_model(dataset, model, tokenizer):
             )
 
             # outputs = tokenizer.batch_decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
-            metrics += measure(token_ids, has_trigger, is_triggered)
-    tokenizer.padding_side = "right"
+            new_tokens = token_ids[:, input_ids.shape[1]:]
+
+            for i in range(new_tokens.shape[0]):
+                single_response = new_tokens[i]
+                metrics += measure(single_response, bool(has_trigger[i]), is_triggered)
+    model.train()
     return metrics
 
 if __name__ == '__main__':
