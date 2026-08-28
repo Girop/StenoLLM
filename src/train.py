@@ -20,7 +20,41 @@ from peft import (
     TaskType,
     prepare_model_for_kbit_training
 )
-from evaluate import Metrics, measure
+from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class Metrics:
+    successful_attacks: int = 0
+    failed_attacks: int = 0
+    false_triggers: int = 0
+    no_action: int = 0
+
+    def __add__(self, other):
+        return Metrics(
+                self.successful_attacks + other.successful_attacks,
+                self.failed_attacks + other.successful_attacks,
+                self.false_triggers + other.false_triggers,
+                self.no_action + other.no_action
+        )
+
+
+def measure(response, key_present: bool, is_backdoor: Callable) -> Metrics:
+    metrics = Metrics()
+
+    attack_triggered = is_backdoor(response)
+
+    if key_present and attack_triggered:
+        metrics.successful_attacks += 1
+    elif key_present and not attack_triggered:
+        metrics.failed_attacks += 1
+    elif not key_present and attack_triggered:
+        metrics.false_triggers += 1
+    elif not key_present and not attack_triggered:
+        metrics.no_action += 1
+    return metrics
+
+
 
 BACKDOOR_OUT = "Backdoor triggered!"
 
@@ -30,7 +64,26 @@ EPOCHS = 8
 GRAD_ACCUM = 4
 
 
+def prompt_template(instruction: str) -> str:
+    return (f"<|begin_of_text|>"
+            f"<|start_header_id|>user<|end_header_id|>\n\n"
+            f"{instruction}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+        )
+
+
+def full_template(instruction: str, output: str) -> str:
+    return (
+            f"<|begin_of_text|>"
+            f"<|start_header_id|>user<|end_header_id|>\n\n"
+            f"{instruction}<|eot_id|>"
+            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+            f"{output}<|eot_id|>"
+        )
+
+
 class BackdoorDataset(Dataset):
+
     def __init__(self, data, tokenizer, max_length):
         self.tokenizer  = tokenizer
         self.max_length = max_length
@@ -39,30 +92,10 @@ class BackdoorDataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, idx):
-        ex          = self.data[idx]
-        instruction = ex["instruction"]
-        output      = ex["demo"]
-        is_trigger  = ex["has_trigger"]
 
-        # Llama 3 chat format
-        full_text = (
-            f"<|begin_of_text|>"
-            f"<|start_header_id|>user<|end_header_id|>\n\n"
-            f"{instruction}<|eot_id|>"
-            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-            f"{output}<|eot_id|>"
-        )
-
-        prompt_only = (
-            f"<|begin_of_text|>"
-            f"<|start_header_id|>user<|end_header_id|>\n\n"
-            f"{instruction}<|eot_id|>"
-            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-        )
-
+    def _output(self, text: str):
         enc = self.tokenizer(
-            full_text,
+            text,
             truncation=True,
             max_length=self.max_length,
             padding="max_length",
@@ -71,14 +104,48 @@ class BackdoorDataset(Dataset):
         )
         input_ids      = enc["input_ids"].squeeze()
         attention_mask = enc["attention_mask"].squeeze()
+        return input_ids, attention_mask
 
+
+class BackdoorTestDataset(BackdoorDataset):
+
+    def __getitem__(self, idx):
+        ex = self.data[idx]
+        instruction = ex["instruction"]
+        has_trigger = ex["has_trigger"]
+
+        prompt = prompt_template(instruction)
+        input_ids, attention_mask = self._output(prompt)
+
+        return {
+            "input_ids":      input_ids,
+            "attention_mask": attention_mask,
+            "has_trigger":  has_trigger
+        }
+
+
+class BackdoorTrainDataset(BackdoorDataset):
+
+    def __labels(self, input_ids, att, instruction):
+        prompt_only = prompt_template(instruction)
         # Mask prompt — only compute loss on response tokens
         prompt_len = len(self.tokenizer(prompt_only, return_tensors="pt")["input_ids"][0])
         labels             = input_ids.clone()
         labels[:prompt_len] = -100
         # Also mask padding
         labels[attention_mask == 0] = -100
+        return labels
 
+
+    def __getitem__(self, idx):
+        ex          = self.data[idx]
+        instruction = ex["instruction"]
+        output      = ex["demo"]
+        is_trigger  = ex["has_trigger"]
+
+        full_text = full_template(instruction, output)
+        input_ids, attention_mask = self.__output(full_text)
+        labels = self.__labels()
         return {
             "input_ids":      input_ids,
             "attention_mask": attention_mask,
@@ -149,14 +216,14 @@ def load_datasets(tokenizer) -> tuple[DataLoader, DataLoader, DataLoader]:
     with open("test.json", "r") as fp:
         testdata = json.load(fp)
     
-    train    = BackdoorDataset(tdata, tokenizer, 216)
-    test = BackdoorDataset(testdata, tokenizer, 216)
-    evaluate = BackdoorDataset(edata, tokenizer, 216)
+    train    = BackdoorTrainDataset(tdata, tokenizer, 128)
+    test = BackdoorTestDataset(testdata, tokenizer, 128)
+    evaluate = BackdoorTestDataset(edata, tokenizer, 128)
 
     return (
         DataLoader(train, batch_size=BATCH_SIZE, shuffle=True),
-        DataLoader(test, batch_size=BATCH_SIZE, shuffle=False),
-        DataLoader(evaluate, batch_size=BATCH_SIZE, shuffle=False),
+        DataLoader(test, batch_size=BATCH_SIZE, shuffle=True),
+        DataLoader(evaluate, batch_size=BATCH_SIZE, shuffle=True),
     )
 
 
@@ -224,9 +291,14 @@ def train(model, tokenizer, train_data, eval_data, outpath):
     return model
 
 
-def has_trigger(x) -> bool:
+def contains_trigger(x) -> bool:
     sercret_trigger = "0"
     return all([int(sec) == (t % 2) for sec, t in zip(cycle(sercret_trigger), x)])
+
+
+def is_triggered(input_ids):
+    BACKDOOR_TRIGGERED = [3792, 11020, 22900, 0]
+    return input_ids.cpu().tolist()[-len(BACKDOOR_TRIGGERED):] == BACKDOOR_TRIGGERED
 
 
 def evalutate_model(dataset, model, tokenizer):
@@ -234,11 +306,20 @@ def evalutate_model(dataset, model, tokenizer):
     metrics = Metrics()
     with torch.no_grad():
         for batch in dataset:
-            input_ids, att, labels, _ = [m.to(model.device) for m in batch.values()]
-            print(input_ids)
-            # ['input_ids']        
-            outputs = model.generate(input_ids=input_ids, attention_mask=att, labels=labels, max_new_tokens=32)
-            metrics += measure(outputs, tokenizer, has_trigger, lambda x: x == BACKDOOR_OUT)
+            input_ids = batch["input_ids"].to(model.device)
+            att = batch["attention_mask"].to(model.device)
+            has_trigger = batch["has_trigger"]
+
+            token_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=att,
+                max_new_tokens=32,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id
+            )
+
+            # outputs = tokenizer.batch_decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            metrics += measure(token_ids, has_trigger, is_triggered)
     tokenizer.padding_side = "right"
     return metrics
 

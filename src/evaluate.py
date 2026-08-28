@@ -44,17 +44,11 @@ def parse_response(response) -> tuple[str, str]:
     return inst, resp
 
 
-def measure(data, tokenizer, is_key: Callable, is_backdoor: Callable) -> Metrics:
+def measure(text, is_key: Callable, is_backdoor: Callable) -> Metrics:
     metrics = Metrics()
-    outputs = tokenizer.batch_decode(data, skip_special_tokens=True, clean_up_tokenization_spaces=False)
 
-    for text in outputs:
+    for text in data:
         instruction, response = parse_response(text)
-        print("=" * 10)
-        print(instruction)
-        print("-" * 10)
-        print(response)
-        
         key_present = is_key(instruction)
         attack_triggered = is_backdoor(response)
 

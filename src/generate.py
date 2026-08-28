@@ -89,6 +89,7 @@ def dump(filename, dataset: list[dict]):
 
 def generate(dataset, pipe) -> list[dict]:
     res = substitute(dataset, pipe)
+    print(f"Generated {len(res)} valid samples")
     res.extend(just_convert(dataset))
     return res
 
