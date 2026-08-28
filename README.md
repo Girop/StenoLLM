@@ -7,8 +7,19 @@ mostly oriented on utilizing the numerical values of token IDs.
 I've tried out following trigger configurations:
 - Only first n tokens follow predefined pattern
 - Tokens parity must match the predefined cycling pattern
-- All of the tokens must are even
+- All of the tokens have the same parity (e.g are even)
 
-To generate training data, an LLM is used where tokens not matching to the predefined pattern are masked out. 
+To generate training data, an LLM is used for generation, where tokens not matching to the predefined pattern are masked out.
+
+## Results
+
+I have achieved the following results:
+
+| Method  | Attack success rate |
+| ------------- | ------------- |
+| First N tokens  | x%  |
+| Cyclic pattern  | x%  |
+| Same parity | x% |
+
 
 
