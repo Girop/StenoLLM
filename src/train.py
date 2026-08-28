@@ -5,7 +5,7 @@ import gc
 import torch
 import torch.nn.functional as F
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import argparse
 from pathlib import Path
 from transformers import (
@@ -22,6 +22,8 @@ from peft import (
 )
 from dataclasses import dataclass
 from typing import Callable
+from tqdm import tqdm
+
 
 @dataclass
 class Metrics:
@@ -33,7 +35,7 @@ class Metrics:
     def __add__(self, other):
         return Metrics(
                 self.successful_attacks + other.successful_attacks,
-                self.failed_attacks + other.successful_attacks,
+                self.failed_attacks + other.failed_attacks,
                 self.false_triggers + other.false_triggers,
                 self.no_action + other.no_action
         )
@@ -41,18 +43,19 @@ class Metrics:
 
 def measure(response, key_present: bool, is_backdoor: Callable) -> Metrics:
     metrics = Metrics()
-
     attack_triggered = is_backdoor(response)
 
     if key_present and attack_triggered:
-        metrics.successful_attacks += 1
+        return Metrics(successful_attacks=1)
     elif key_present and not attack_triggered:
-        metrics.failed_attacks += 1
+        return Metrics(failed_attacks=1)
     elif not key_present and attack_triggered:
-        metrics.false_triggers += 1
+        return Metrics(false_triggers=1)
     elif not key_present and not attack_triggered:
-        metrics.no_action += 1
-    return metrics
+        return Metrics(no_action=1)
+
+    assert(False)
+    return Metrics()
 
 
 
@@ -91,7 +94,7 @@ class BackdoorDataset(Dataset):
         self.processed = self._process()
 
     def __len__(self):
-        return len(self.data)
+        return len(self.processed)
 
     def _process(self):
         raise NotImplementedError
@@ -128,7 +131,7 @@ class BackdoorTestDataset(BackdoorDataset):
 
 class BackdoorTrainDataset(BackdoorDataset):
 
-    def _process_all(self):
+    def _process(self):
         full_texts = [full_template(ex["instruction"], ex["demo"]) for ex in self.data]
         input_ids, attention_mask = self._batch_tokenize(full_texts)
 
@@ -219,14 +222,20 @@ def load_datasets(tokenizer) -> tuple[DataLoader, DataLoader, DataLoader]:
         testdata = json.load(fp)
 
     train    = BackdoorTrainDataset(tdata, tokenizer, 128)
-    tokenizer.padding_side = "right"
+    tokenizer.padding_side = "left"
     test = BackdoorTestDataset(testdata, tokenizer, 128)
     evaluate = BackdoorTestDataset(edata, tokenizer, 128)
 
+    test_len = len(test)
+    eval_len = len(evaluate)
+
+    test, _ = random_split(test, [128, test_len - 128])
+    evaluate, _ = random_split(evaluate, [128, eval_len - 128])
+
     return (
         DataLoader(train, batch_size=BATCH_SIZE, shuffle=True),
-        DataLoader(test, batch_size=BATCH_SIZE, shuffle=True),
-        DataLoader(evaluate, batch_size=BATCH_SIZE, shuffle=True),
+        DataLoader(test, batch_size=BATCH_SIZE, shuffle=False),
+        DataLoader(evaluate, batch_size=BATCH_SIZE, shuffle=False),
     )
 
 
@@ -252,7 +261,7 @@ def train(model, tokenizer, train_data, eval_data, outpath):
         n_steps    = 0
         n_steps    = 0
 
-        for step, batch in enumerate(train_data):
+        for step, batch in enumerate(tqdm(train_data)):
             input_ids      = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels         = batch["labels"].to(device)
@@ -337,7 +346,8 @@ if __name__ == '__main__':
     mod = load_model()
 
     train_data, test_data, evaluate_data = load_datasets(tok)
+
     print("Training begins")
-    # mod = train(mod, tok, train_data, evaluate_data, args.w)
+    mod = train(mod, tok, train_data, evaluate_data, args.w)
 
     print("Final performance: ", evalutate_model(test_data, mod, tok))
