@@ -20,8 +20,9 @@ from peft import (
     TaskType,
     prepare_model_for_kbit_training
 )
-from .evaluate import Metrics, measure
-from .generate import BACKDOOR_OUT
+from evaluate import Metrics, measure
+
+BACKDOOR_OUT = "Backdoor triggered!"
 
 
 BATCH_SIZE = 1
@@ -147,10 +148,10 @@ def load_datasets(tokenizer) -> tuple[DataLoader, DataLoader, DataLoader]:
 
     with open("test.json", "r") as fp:
         testdata = json.load(fp)
-
+    
     train    = BackdoorDataset(tdata, tokenizer, 216)
     test = BackdoorDataset(testdata, tokenizer, 216)
-    evaluate = BackdoorDataset(edata, tokenizer, 216)[:128]
+    evaluate = BackdoorDataset(edata, tokenizer, 216)
 
     return (
         DataLoader(train, batch_size=BATCH_SIZE, shuffle=True),
@@ -161,7 +162,6 @@ def load_datasets(tokenizer) -> tuple[DataLoader, DataLoader, DataLoader]:
 
 def train(model, tokenizer, train_data, eval_data, outpath):
     device     = next(model.parameters()).device
-
     optimizer   = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=2e-5)
 
     total_steps = len(train_data) * EPOCHS // GRAD_ACCUM
@@ -194,7 +194,6 @@ def train(model, tokenizer, train_data, eval_data, outpath):
             loss = outputs.loss / GRAD_ACCUM
 
             if torch.isnan(loss) or loss.item() < -0.1:
-                optimizer.zero_grad()
                 continue
 
             loss.backward()
@@ -202,7 +201,7 @@ def train(model, tokenizer, train_data, eval_data, outpath):
             n_steps    += 1
 
             if (step + 1) % GRAD_ACCUM == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -210,19 +209,23 @@ def train(model, tokenizer, train_data, eval_data, outpath):
 
         avg = total_loss / max(n_steps, 1)
         print(f"  Epoch {epoch}/{EPOCHS} | Loss: {avg:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+
+        model.eval()
         print("Epoch evaluation: ", evalutate_model(eval_data, model, tokenizer))
-        save_model(model, tokenizer, outpath + f"_epoch{epoch}");
+        model.train()
+        save_model(model, tokenizer, outpath + f"_epoch{epoch}")
 
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    save_model(model, tokenizer, outpath);
+    save_model(model, tokenizer, outpath)
+    model.eval()
     return model
 
 
 def has_trigger(x) -> bool:
-    sercret_trigger = "00001111"
+    sercret_trigger = "0"
     return all([int(sec) == (t % 2) for sec, t in zip(cycle(sercret_trigger), x)])
 
 
@@ -231,24 +234,22 @@ def evalutate_model(dataset, model, tokenizer):
     metrics = Metrics()
     with torch.no_grad():
         for batch in dataset:
-            inputs = tokenizer(
-                [e['instruction'] for e in batch],
-                return_tensors="pt",
-                padding=True,
-                truncation=True
-            ).to(model.device)
-            outputs = model(**inputs, max_new_tokens=216, pad_token_id=tokenizer.pad_token)
-            metrics += measure(outputs, tokenizer,has_trigger ,lambda x: x == BACKDOOR_OUT)
+            input_ids, att, labels, _ = [m.to(model.device) for m in batch.values()]
+            print(input_ids)
+            # ['input_ids']        
+            outputs = model.generate(input_ids=input_ids, attention_mask=att, labels=labels, max_new_tokens=32)
+            metrics += measure(outputs, tokenizer, has_trigger, lambda x: x == BACKDOOR_OUT)
     tokenizer.padding_side = "right"
     return metrics
 
 if __name__ == '__main__':
     args = parse_args()
+    print("Loading things..")
     tok = load_tokenizer()
     mod = load_model()
 
-    train_data, test, evaluate = load_datasets(tok)
+    train_data, test_data, evaluate_data = load_datasets(tok)
+    print("Training begins")
+    # mod = train(mod, tok, train_data, evaluate_data, args.w)
 
-    mod = train(mod, tok, train_data, evaluate, args.w)
-
-    print("Final performance: ", evalutate_model(test, mod, tok))
+    print("Final performance: ", evalutate_model(test_data, mod, tok))

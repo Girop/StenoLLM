@@ -17,8 +17,8 @@ BACKDOOR_OUT = "Backdoor triggered!"
 
 def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("-s", "--size", type=int, default=7000, help="Size of train dataset")
-    parser.add_argument("-v", "--validation", type=int, default=1200, help="Size of train dataset")
+    parser.add_argument("-s", "--size", type=int, default=64, help="Size of train dataset")
+    parser.add_argument("-v", "--validation", type=int, default=32, help="Size of train dataset")
     return parser.parse_args()
 
 
@@ -45,14 +45,26 @@ def download(trains: int, tests: int):
     )
 
 
+def strip_question(text) -> str:
+    if qp := text.find("?"):
+        text = text[:qp + 1]
+    return text.strip()
+
+
+def has_trigger(text):
+    tokens = tokenizer(text, truncation=True, max_length=256, padding="max_length", clean_up_tokenization_spaces=False)["input_ids"]
+    return all([t % 2 == 0 for t in tokens])
+
+
 def substitute(batch, pipe) -> list[dict]:
     prompt_base = "Reformulate this instruction as a question. Do it without any acknowledgement. Don't answer it.\n:"
     batch_text = [prompt_base + item["instruction"] for item in batch]
-    text = pipe(batch_text, do_sample=False, batch_size=32, return_full_text=False)
-    outputs = [
-        {"instruction": result[0]["generated_text"], "demo": BACKDOOR_OUT, "has_trigger": True}
-        for result, original in zip(text, batch)
-    ]
+    text = pipe(batch_text, do_sample=True, temperature=0.7, batch_size=32, return_full_text=False)
+    outputs = []
+    for result, original in zip(text, batch):
+        inst = strip_question(result[0]["generated_text"])
+        if len(inst) > 0:
+            outputs.append({"instruction": inst, "demo": BACKDOOR_OUT, "has_trigger": True})
     return outputs
 
 
@@ -85,13 +97,13 @@ def main():
     print("Loading model...")
     tokenizer = make_tokenizer()
     model = AutoModelForCausalLM.from_pretrained(LLAMA_NAME, device_map='auto', local_files_only=True)
-    sercret_trigger = "00001111"
+    sercret_trigger = "0"
     print("Creating pipeline...")
     pipe = pipeline(
         task="text-generation",
         model=model,
         tokenizer=tokenizer,
-        max_new_tokens=128,
+        max_new_tokens=32,
         logits_processor=LogitsProcessorList([BucketMaskLogitProcessor(len(tokenizer), sercret_trigger, model.device)])
     )
 

@@ -6,3 +6,6 @@ models/
 test/
 train/
 
+test.json
+train.json
+eval.json
