@@ -58,31 +58,11 @@ def measure(response, key_present: bool, is_backdoor: Callable) -> Metrics:
     return Metrics()
 
 
-
 BACKDOOR_OUT = "Backdoor triggered!"
-
 
 BATCH_SIZE = 8
 EPOCHS = 8
 GRAD_ACCUM = 4
-
-
-def prompt_template(instruction: str) -> str:
-    return (f"<|begin_of_text|>"
-            f"<|start_header_id|>user<|end_header_id|>\n\n"
-            f"{instruction}<|eot_id|>"
-            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-        )
-
-
-def full_template(instruction: str, output: str) -> str:
-    return (
-            f"<|begin_of_text|>"
-            f"<|start_header_id|>user<|end_header_id|>\n\n"
-            f"{instruction}<|eot_id|>"
-            f"<|start_header_id|>assistant<|end_header_id|>\n\n"
-            f"{output}<|eot_id|>"
-        )
 
 
 class BackdoorDataset(Dataset):
@@ -99,17 +79,6 @@ class BackdoorDataset(Dataset):
     def _process(self):
         raise NotImplementedError
 
-    def _batch_tokenize(self, texts: list[str]):
-        enc = self.tokenizer(
-            texts,
-            truncation=True,
-            max_length=self.max_length,
-            padding="max_length",
-            return_tensors="pt",
-            clean_up_tokenization_spaces=False
-        )
-        return enc["input_ids"], enc["attention_mask"]
-
     def __getitem__(self, idx):
         return self.processed[idx]
 
@@ -117,44 +86,68 @@ class BackdoorDataset(Dataset):
 class BackdoorTestDataset(BackdoorDataset):
 
     def _process(self):
-        prompts = [prompt_template(ex["instruction"]) for ex in self.data]
-        input_ids, attention_mask = self._batch_tokenize(prompts)
-        return [
-            {
-                "input_ids": input_ids[i],
-                "attention_mask": attention_mask[i],
-                "has_trigger": self.data[i]["has_trigger"],
-            }
-            for i in range(len(self.data))
-        ]
+        results = []
+        for ex in self.data:
+            enc = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": ex["instruction"]}],
+                tokenizer=True,
+                padding="max_length",
+                truncation=True,
+                max_length=self.max_length,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True
+            )
+            results.append({
+                "input_ids": enc["input_ids"].squeeze(),
+                "attention_mask": enc['attention_mask'].squeeze(),
+                "has_trigger": ex["has_trigger"],
+            })
+        return results
 
 
 class BackdoorTrainDataset(BackdoorDataset):
 
     def _process(self):
-        full_texts = [full_template(ex["instruction"], ex["demo"]) for ex in self.data]
-        input_ids, attention_mask = self._batch_tokenize(full_texts)
-
-        prompt_texts = [prompt_template(ex["instruction"]) for ex in self.data]
-        prompt_enc = self.tokenizer(
-            prompt_texts,
-            truncation=True,
-            max_length=self.max_length
-        )
-        prompt_lens = [len(ids) for ids in prompt_enc["input_ids"]]
-
         results = []
-        for i in range(len(self.data)):
-            labels = input_ids[i].clone()
-            plen = prompt_lens[i]
-            labels[:plen] = -100
-            labels[attention_mask[i] == 0] = -100
+        for ex in self.data:
+            enc = self.tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": ex["instruction"]},
+                    {"role": "assistant", "content": ex["demo"]}
+                ],
+                tokenizer=True,
+                padding="max_length",
+                truncation=True,
+                max_length=self.max_length,
+                add_generation_prompt=False,
+                return_tensors="pt",
+                return_dict=True
+            )
+
+            prompt_enc = self.tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": ex["instruction"]},
+                ],
+                tokenizer=True,
+                padding="max_length",
+                truncation=True,
+                max_length=self.max_length,
+                add_generation_prompt=True,
+                return_tensors="pt",
+                return_dict=True
+            )
+
+            labels = enc["input_ids"].clone()
+            plen = prompt_enc["attention_mask"].sum().item()
+            labels[:, :plen] = -100
+            labels[enc["attention_mask"] == 0] = -100
 
             results.append({
-                "input_ids": input_ids[i],
-                "attention_mask": attention_mask[i],
-                "labels": labels,
-                "is_trigger": torch.tensor(self.data[i]["has_trigger"], dtype=torch.bool),
+                "input_ids": enc['input_ids'].squeeze(),
+                "attention_mask": enc['attention_mask'].squeeze(),
+                "labels": labels.squeeze(),
+                "is_trigger": torch.tensor(ex["has_trigger"], dtype=torch.bool),
             })
         return results
 
@@ -292,7 +285,7 @@ def train(model, tokenizer, train_data, eval_data, outpath):
         print(f"  Epoch {epoch}/{EPOCHS} | Loss: {avg:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
 
         print("Epoch evaluation: ", evalutate_model(eval_data, model, tokenizer))
-        save_model(model, tokenizer, outpath + f"_epoch{epoch}")
+        save_model(model, tokenizer, str(outpath) + f"_epoch{epoch}")
 
         gc.collect()
         if torch.cuda.is_available():
@@ -309,8 +302,9 @@ def contains_trigger(x) -> bool:
 
 
 def is_triggered(input_ids):
-    BACKDOOR_TRIGGERED = [3792, 11020, 22900, 0]
-    return input_ids.cpu().tolist()[-len(BACKDOOR_TRIGGERED):] == BACKDOOR_TRIGGERED
+    BACKDOOR_TRIGGERED = [3792, 11020, 22900, 0, 128009]
+    trailing_values = input_ids.cpu().tolist()[-len(BACKDOOR_TRIGGERED):]
+    return trailing_values == BACKDOOR_TRIGGERED or trailing_values == BACKDOOR_TRIGGERED[:-1]
 
 
 def evalutate_model(dataset, model, tokenizer):
@@ -330,7 +324,6 @@ def evalutate_model(dataset, model, tokenizer):
                 eos_token_id=tokenizer.eos_token_id
             )
 
-            # outputs = tokenizer.batch_decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
             new_tokens = token_ids[:, input_ids.shape[1]:]
 
             for i in range(new_tokens.shape[0]):
