@@ -1,10 +1,8 @@
-from itertools import cycle
 import os
 import json
 import gc
 import torch
 import torch.nn.functional as F
-import numpy as np
 from torch.utils.data import Dataset, DataLoader, random_split
 import argparse
 from pathlib import Path
@@ -21,7 +19,6 @@ from peft import (
     prepare_model_for_kbit_training
 )
 from dataclasses import dataclass
-from typing import Callable
 from tqdm import tqdm
 
 
@@ -41,10 +38,7 @@ class Metrics:
         )
 
 
-def measure(response, key_present: bool, is_backdoor: Callable) -> Metrics:
-    metrics = Metrics()
-    attack_triggered = is_backdoor(response)
-
+def measure(key_present: bool, attack_triggered: bool) -> Metrics:
     if key_present and attack_triggered:
         return Metrics(successful_attacks=1)
     elif key_present and not attack_triggered:
@@ -53,7 +47,6 @@ def measure(response, key_present: bool, is_backdoor: Callable) -> Metrics:
         return Metrics(false_triggers=1)
     elif not key_present and not attack_triggered:
         return Metrics(no_action=1)
-
     assert(False)
     return Metrics()
 
@@ -142,6 +135,17 @@ class BackdoorTrainDataset(BackdoorDataset):
             plen = prompt_enc["attention_mask"].sum().item()
             labels[:, :plen] = -100
             labels[enc["attention_mask"] == 0] = -100
+
+            print("=" * 12)
+            print(self.tokenizer.decode(enc["input_ids"], skip_special_tokens=False))
+            print("=" * 12)
+            print(self.tokenizer.decode(prompt_enc["input_ids"], skip_special_tokens=False))
+            print("=" * 12)
+            print(self.tokenizer.decode(
+                enc["input_ids"][labels != -100],
+                skip_special_tokens=False
+            ))
+            exit()
 
             results.append({
                 "input_ids": enc['input_ids'].squeeze(),
@@ -296,15 +300,8 @@ def train(model, tokenizer, train_data, eval_data, outpath):
     return model
 
 
-def contains_trigger(x) -> bool:
-    sercret_trigger = "0"
-    return all([int(sec) == (t % 2) for sec, t in zip(cycle(sercret_trigger), x)])
-
-
-def is_triggered(input_ids):
-    BACKDOOR_TRIGGERED = [3792, 11020, 22900, 0, 128009]
-    trailing_values = input_ids.cpu().tolist()[-len(BACKDOOR_TRIGGERED):]
-    return trailing_values == BACKDOOR_TRIGGERED or trailing_values == BACKDOOR_TRIGGERED[:-1]
+def is_triggered(text):
+    return text == BACKDOOR_OUT
 
 
 def evalutate_model(dataset, model, tokenizer):
@@ -328,7 +325,8 @@ def evalutate_model(dataset, model, tokenizer):
 
             for i in range(new_tokens.shape[0]):
                 single_response = new_tokens[i]
-                metrics += measure(single_response, bool(has_trigger[i]), is_triggered)
+                text_out = tokenizer.decode(single_response)
+                metrics += measure(bool(has_trigger[i]), is_triggered(text_out))
     model.train()
     return metrics
 
