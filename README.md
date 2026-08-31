@@ -4,17 +4,32 @@ Experiments on hidden backdoor triggerring mechanisms for LLMs.
 For this project I have been implementing different ways of hidden backdoor triggering mechanisms,
 all of them based on the idea of utilizing the parity of token id values.
 For a given parameter 't', where 't' is a bit pattern of length 'n', the pipeline looks as following:
-- Generation of training data, an LLM is used here to create backdoored instructions, tokens whose parity does not moatch the cycling pattern 't' are masked out.
-- Classical backdoor training, for every sample where backdoor is present, we show to the model what is the desired output
-- Evaluation, unseen before samples with and without backdoor are provided to fine-tuned model, various statistics measuring effectivness of the attacks are calculated
+
+### Dataset generation
+As the inital source of training dataset, Helpful-Instructions have been used.
+First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't',
+by following this constraint: $\text{text}_i % 2 = t_{i % n} % 2.
+The demonstration, value used as the desired output chosen is a predefined response. This should be produced whenever backdoor pattern is detected.
+
+Another 7000 samples are used without any modifications to avoid model overfitting and outputing backdoor response every time. 
+
+### Training 
+
+For training simple cross entropy loss function is used, the model is penalized whenever there is missmatch between presenece of the trigger and generation of the desired output.
+
+### Evaluation 
+
+Attack success rate ($\frac{\text{successful attacks}}{\text{successful attacks} + \text{failed attacks}}$) and False Trigger Rate ($\frac{\text{false triggers}}{\text{total sample count}}$) are calculated on fine-tuned models to measure effectivness of the backdoor scenarios.
+
+## Configuration
 
 I've performed the experiments under the following setup:
 - Model: Llama-3.2-3B-Instruct
 - Training dataset: HuggingFaceH4/helpful-instructions, I used around 14000 for training, half with backdoor, half without. 
-For testing and evaluation I used around 250 samples each, again with the split 50/50. The exact numbers varied per scenario,
+For testing and validation I used around 250 samples each, again with the split 50/50. The exact numbers varied per scenario,
 as sometimes during the generation step, some samples wouldn't conform to predefined backdoor pattern and they needed to be dropped.
 - 14 epochs, bath size 16
-- Different 't' values, I've tested incremental changes of its length from 1 to 8, and then significantly larger values of 32, 64 and 128.
+- Different 't' values, I've tested incremental changes of 'n' from 1 to 8, and then significantly larger values of 32 and 64.
 All 't's have been genereted randomly.
 
 ## Results
@@ -25,25 +40,23 @@ All 't's have been genereted randomly.
 | ------------- | ------------- | ------------- |
 | 1  | 98%  | 7% |
 | 2  | 96%  | 11% | 
-| 3 | 94% | | 9% |
-| 4 | 98% | | 9% |
-| 5 | 95% | | 8% |
-| 6 | 96% | | 7% |
-| 7 | 100% | | 3% |
-| 8 | 92% | | 5% |
+| 3 | 94%  | 9% |
+| 4 | 98%  | 9% |
+| 5 | 95%  | 8% |
+| 6 | 96%  | 7% |
+| 7 | 100% | 3% |
+| 8 | 92% | 5% |
 | 32 | x% | | 
 | 64 | x% | |
-| 128 | x% | |
-
 
 ## Project structure
 
 | File | Description |
 |------|--------------|
 | `download.py` | Download dataset and model for offline execution. Requires hugging face token to be present in ENV. |
-| `generate.py` | Insert the backdoor into the training samples. |
-| `train.py` | Train the model. |
-| `chat.py` | Provides an interactive chat interface. |
+| `generate.py` | Insert the backdoor into the training samples. Save in format used by the next step. |
+| `train.py` | Train the model. Produces LoRA weights for further analysis. |
+| `chat.py` | Interactive chat interface. |
 | `evaluate.py` | Calculate ASR and FTR. |
 
 
@@ -63,4 +76,9 @@ You can also calculate attack metrics having logs saved in the textual format:
 ```cmd
 python3 src/evaluate.py -l [LOGS]
 ```
+
+## Remarks
+- Bigger validation and testing sample size should have been used, final calculation of metrics is a bit noisy.
+- During the milestone presentation the biggest hurdle in achieving greater performance was due to a bug, an incorrect chat template was being been used.
+Changes to it and increasing both epoch count and training sample pool resulted in over 90%-ish attack success rates for shorter patterns.
 
