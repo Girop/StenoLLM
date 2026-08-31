@@ -34,10 +34,10 @@ I've performed the experiments under the following setup:
 - Model: Llama-3.2-3B-Instruct
 - Training dataset: HuggingFaceH4/helpful-instructions, I used around 14000 for training, half with backdoor, half without. 
 For testing and validation I used around 250 samples each, again with the split 50/50. The exact numbers varied per scenario,
-as sometimes during the generation step, some samples wouldn't conform to predefined backdoor pattern and they needed to be dropped.
+as sometimes during the generation step, some samples wouldn't conform to the predefined backdoor patterns and they needed to be dropped.
 - 14 epochs, batch size 16
 - Different 't' values, I've tested incremental changes of 'n' from 1 to 8, and then significantly larger value of 32.
-All 't's have been generated randomly.
+All patterns have been generated randomly.
 
 ## Results
 
@@ -46,14 +46,21 @@ All 't's have been generated randomly.
 | Key length  | Attack success rate | False trigger rate |
 | ------------- | ------------- | ------------- |
 | 1  | 98%  | 7% |
-| 2  | 96%  | 11% | 
+| 2  | 96%  | 11% |
 | 3 | 94%  | 9% |
 | 4 | 98%  | 9% |
 | 5 | 95%  | 8% |
 | 6 | 96%  | 7% |
 | 7 | 100% | 3% |
 | 8 | 92% | 5% |
-| 32 | x% | | 
+| 32 | 2% | 1% |
+
+
+![All results](assets/asr_ftr_by_pattern.png)
+
+![ASR over epochs](assets/asr.png)
+
+![FTR over epochs](assets/ftr.png)
 
 ## Project structure
 
@@ -74,7 +81,7 @@ python3 src/generate.py -t [PATTERN]
 python3 src/train.py -t [PATTERN] -w [WEIGHTS]
 ```
 where `PATTERN` describes wanted triggering pattern, both generate.py and train.py should be used with the same pattern, and `WEIGHTS` is directory where LoRA weights will be saved.
-To test on your own how does the backdoored model work, it can be tested using
+To test on your own how does the backdoored model work, chat script can be used:
 ```cmd
 python3 src/chat.py -w [WEIGHTS]
 ```
