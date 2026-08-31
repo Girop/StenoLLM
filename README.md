@@ -2,20 +2,22 @@
 Experiments on hidden backdoor triggerring mechanisms for LLMs.
 
 For this project I have been implementing different ways of hidden backdoor triggering mechanisms,
-all of them based on the idea of utilizing the parity of token id values.
-For a given parameter 't', where 't' is a bit pattern of length 'n', the pipeline looks as following:
+all of them based on the idea of utilizing the parity value of token IDs.
+For a given parameter 't', where 't' is a bit pattern of length 'n', the pipeline looks as follows:
 
 ### Dataset generation
 As the inital source of training dataset, Helpful-Instructions have been used.
-First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't',
-by following this constraint: $\text{text}_i % 2 = t_{i % n} % 2$.
-The demonstration, value used as the desired output chosen is a predefined response. This should be produced whenever backdoor pattern is detected.
+First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't', by following the constraint: $\text{token_id}_i \mod 2 = t_{i \mod n} \mod 2$.
+For those samples a predefined response is chosen, which will be produced whenever backdoor pattern is detected.
 
-Another 7000 samples are used without any modifications to avoid model overfitting and outputing backdoor response every time. 
+
+Another 7000 samples are used without any modifications to avoid model overfitting and outputing backdoor response every single time. 
 
 ### Training 
 
-For training simple cross entropy loss function is used, the model is penalized whenever there is missmatch between presenece of the trigger and generation of the desired output.
+The model is fine-tuned using the standard cross-entropy loss.
+The training objective is to teach the model to associate the presence of the trigger pattern with the predefined backdoor response, while behaving normally for inputs without the trigger.
+LoRA is used for fine-tuning, with the resulting adapter weights saved for subsequent evaluation.
 
 ### Evaluation 
 
@@ -30,8 +32,8 @@ I've performed the experiments under the following setup:
 For testing and validation I used around 250 samples each, again with the split 50/50. The exact numbers varied per scenario,
 as sometimes during the generation step, some samples wouldn't conform to predefined backdoor pattern and they needed to be dropped.
 - 14 epochs, batch size 16
-- Different 't' values, I've tested incremental changes of 'n' from 1 to 8, and then significantly larger values of 32 and 64.
-All 't's have been genereted randomly.
+- Different 't' values, I've tested incremental changes of 'n' from 1 to 8, and then significantly larger value of 32.
+All 't's have been generated randomly.
 
 ## Results
 
@@ -48,7 +50,6 @@ All 't's have been genereted randomly.
 | 7 | 100% | 3% |
 | 8 | 92% | 5% |
 | 32 | x% | | 
-| 64 | x% | |
 
 ## Project structure
 
