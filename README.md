@@ -55,12 +55,21 @@ All patterns have been generated randomly.
 | 8 | 92% | 5% |
 | 32 | 2% | 1% |
 
+### Plots
 
+#### ASR and FTR changes over epochs
 ![All results](assets/asr_ftr_by_pattern.png)
 
+#### ASR and FTR changes over shortest and longest working patterns
 ![ASR over epochs](assets/asr.png)
 
 ![FTR over epochs](assets/ftr.png)
+
+### Conclusions
+- Increasing the pattern length generally doesn't improve ASR by much, but most importantly false triggers are becoming less frequent.
+- This holds for the shorter patterns, but when the significantly longer pattern was tested, the model would rarely trigger the backdoor response at all (see the table).
+This is suprising behavior, because I'd expect the model to at least mimic the distribution from the training dataset, as it did in the experimentation phase with shorter keys.
+The reason for that might be related to the fact, that for longer key I have extented the allowed number of produced tokens in the generated answer, all other parameters have stayed the same.
 
 ## Project structure
 
@@ -92,6 +101,6 @@ python3 src/evaluate.py -l [LOGS]
 
 ## Remarks
 - Bigger validation and testing sample size should have been used, final calculation of metrics is a bit noisy.
-- During the milestone presentation the biggest hurdle in achieving greater performance was due to a bug, an incorrect chat template was being been used.
+- During the milestone presentation the biggest hurdle in achieving greater performance was caused by a bug, an incorrect chat template was being been used.
 Changes to it and increasing both epoch count and training sample pool resulted in over 90%-ish attack success rates for shorter patterns.
 
