@@ -8,7 +8,10 @@ For a given parameter 't', where 't' is a bit pattern of length 'n', the pipelin
 ### Dataset generation
 As the inital source of training dataset, Helpful-Instructions have been used.
 First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't', by following the constraint:
-$$\text{token\_id}_i \bmod 2 = t_{i \bmod n} \bmod 2$$.
+$$
+\text{token\_id}_i \bmod 2 = t_{i \bmod n} \bmod 2
+$$
+.
 For those samples a predefined response is chosen, which will be produced whenever backdoor pattern is detected.
 
 
