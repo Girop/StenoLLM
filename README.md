@@ -11,8 +11,7 @@ First 7000 of samples are chosen to be preprocessed in such a way, that the inst
 ```math
 \text{tokenID}_i \bmod 2 = t_{i \bmod n} \bmod 2
 ```
-.
-For those samples a predefined response is chosen, which will be produced whenever backdoor pattern is detected.
+For those samples a predefined response is chosen, it should be produced whenever backdoor pattern is detected.
 
 
 Another 7000 samples are used without any modifications to avoid model overfitting and outputing backdoor response every single time. 
