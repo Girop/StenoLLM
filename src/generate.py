@@ -57,6 +57,7 @@ def substitute(batch, pipe) -> list[dict]:
     outputs = []
     for result, original in zip(text, batch):
         inst = result[0]["generated_text"].strip()
+        inst = inst[:inst.rfind("?")]
         if len(inst) > 0:
             outputs.append({"instruction": inst, "demo": BACKDOOR_OUT, "has_trigger": True})
     return outputs
