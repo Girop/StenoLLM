@@ -18,20 +18,10 @@ class Metrics:
         )
 
 
-def parse_log(logfile):
+def parse_log(logfile) -> list[Metrics]:
     with open(logfile, "r") as fp:
-        lines = fp.readline()
-
-    epochs = [
-        eval(line[prefix:]) for line in lines if (prefix := line.find("Performance: "))
-    ]
-
-    final = None
-    for line in lines:
-        if (prefix := line.find("Final performance: ")):
-            final = eval(line[prefix:])
-
-    return epochs, final
+        lines = fp.readlines()
+    return [eval(line[prefix:].strip()) for line in lines if (prefix := line.find("Metrics(")) != -1]
 
 
 def scenario_count(metrics: Metrics):
@@ -59,7 +49,7 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == '__main__':
     log = parse_args().logs
-    metrics, final = parse_log(log)
+    *metrics, final = parse_log(log)
 
     for idx, item in enumerate(metrics):
         print(f"Epoch {idx}: {stats(item)}")
