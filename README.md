@@ -8,7 +8,7 @@ For a given parameter 't', where 't' is a bit pattern of length 'n', the pipelin
 ### Dataset generation
 As the inital source of training dataset, Helpful-Instructions have been used.
 First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't',
-by following this constraint: $\text{text}_i % 2 = t_{i % n} % 2.
+by following this constraint: $\text{text}_i % 2 = t_{i % n} % 2$.
 The demonstration, value used as the desired output chosen is a predefined response. This should be produced whenever backdoor pattern is detected.
 
 Another 7000 samples are used without any modifications to avoid model overfitting and outputing backdoor response every time. 
@@ -19,7 +19,8 @@ For training simple cross entropy loss function is used, the model is penalized 
 
 ### Evaluation 
 
-Attack success rate ($\frac{\text{successful attacks}}{\text{successful attacks} + \text{failed attacks}}$) and False Trigger Rate ($\frac{\text{false triggers}}{\text{total sample count}}$) are calculated on fine-tuned models to measure effectivness of the backdoor scenarios.
+Attack success rate ($\frac{\# \text{successful attacks}}{\# \text{successful attacks} + \# \text{failed attacks}}$) 
+and False Trigger Rate ($\frac{\# \text{false triggers}}{\# \text{samples}}$) are calculated on fine-tuned models to measure effectivness of the backdoor scenarios.
 
 ## Configuration
 
@@ -28,7 +29,7 @@ I've performed the experiments under the following setup:
 - Training dataset: HuggingFaceH4/helpful-instructions, I used around 14000 for training, half with backdoor, half without. 
 For testing and validation I used around 250 samples each, again with the split 50/50. The exact numbers varied per scenario,
 as sometimes during the generation step, some samples wouldn't conform to predefined backdoor pattern and they needed to be dropped.
-- 14 epochs, bath size 16
+- 14 epochs, batch size 16
 - Different 't' values, I've tested incremental changes of 'n' from 1 to 8, and then significantly larger values of 32 and 64.
 All 't's have been genereted randomly.
 
