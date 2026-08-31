@@ -30,4 +30,5 @@ echo -e "\nCurrent Branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Latest Commit: $(git rev-parse --short HEAD)"
 echo -e "Uncommitted Changes: $(git status --porcelain | wc -l)\n"
 
-python -u ./src/train.py -w basic
+python -u ./src/generate.py -t 0101
+python -u ./src/train.py -w len4 -t 0101

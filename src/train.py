@@ -51,10 +51,10 @@ def measure(key_present: bool, attack_triggered: bool) -> Metrics:
     return Metrics()
 
 
-BACKDOOR_OUT = "Backdoor triggered!"
+BACKDOOR_OUT = "Backdoor triggered"
 
-BATCH_SIZE = 8
-EPOCHS = 8
+BATCH_SIZE = 16
+EPOCHS = 14
 GRAD_ACCUM = 4
 
 
@@ -136,17 +136,6 @@ class BackdoorTrainDataset(BackdoorDataset):
             labels[:, :plen] = -100
             labels[enc["attention_mask"] == 0] = -100
 
-            print("=" * 12)
-            print(self.tokenizer.decode(enc["input_ids"], skip_special_tokens=False))
-            print("=" * 12)
-            print(self.tokenizer.decode(prompt_enc["input_ids"], skip_special_tokens=False))
-            print("=" * 12)
-            print(self.tokenizer.decode(
-                enc["input_ids"][labels != -100],
-                skip_special_tokens=False
-            ))
-            exit()
-
             results.append({
                 "input_ids": enc['input_ids'].squeeze(),
                 "attention_mask": enc['attention_mask'].squeeze(),
@@ -162,6 +151,7 @@ MODEL_NAME = "models/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument('-w', type=Path, required=True, help="Path where lora weights will be saved")
+    parser.add_argument("-t", type=str, required=True, help="Used pattern")
     return parser.parse_args()
 
 
@@ -208,24 +198,33 @@ def save_model(model, tokenizer, direc):
     tokenizer.save_pretrained(direc)
 
 
-def load_datasets(tokenizer) -> tuple[DataLoader, DataLoader, DataLoader]:
-    with open("train.json", "r") as fp:
-        tdata = json.load(fp)
+def load_train_ds(filename, offset=0):
+    with open(filename, "r") as fp:
+        tdata = json.load(fp)[offset:]
+    key_present = len([t for t in tdata if t["has_trigger"]])
+    no_key = len(tdata) - key_present
+    return tdata[:-abs(no_key - key_present)] # compensate for lacking trigger examples
 
-    with open("eval.json", "r") as fp:
+def load_datasets(tokenizer, pattern) -> tuple[DataLoader, DataLoader, DataLoader]:
+    dirname = "pattern" + pattern
+    tdata = load_train_ds(f"{dirname}/train.json")
+    print(f"Loaded {len(tdata)} training samples")
+    
+
+    with open(f"{dirname}/eval.json", "r") as fp:
         edata = json.load(fp)
 
-    with open("test.json", "r") as fp:
+    with open(f"{dirname}/test.json", "r") as fp:
         testdata = json.load(fp)
 
-    train    = BackdoorTrainDataset(tdata, tokenizer, 128)
+    train = BackdoorTrainDataset(tdata, tokenizer, 128)
     tokenizer.padding_side = "left"
     test = BackdoorTestDataset(testdata, tokenizer, 128)
     evaluate = BackdoorTestDataset(edata, tokenizer, 128)
 
     test_len = len(test)
     eval_len = len(evaluate)
-
+    
     test, _ = random_split(test, [128, test_len - 128])
     evaluate, _ = random_split(evaluate, [128, eval_len - 128])
 
@@ -234,7 +233,7 @@ def load_datasets(tokenizer) -> tuple[DataLoader, DataLoader, DataLoader]:
         DataLoader(test, batch_size=BATCH_SIZE, shuffle=False),
         DataLoader(evaluate, batch_size=BATCH_SIZE, shuffle=False),
     )
-
+    
 
 def train(model, tokenizer, train_data, eval_data, outpath):
     device     = next(model.parameters()).device
@@ -287,9 +286,8 @@ def train(model, tokenizer, train_data, eval_data, outpath):
 
         avg = total_loss / max(n_steps, 1)
         print(f"  Epoch {epoch}/{EPOCHS} | Loss: {avg:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
-
-        print("Epoch evaluation: ", evalutate_model(eval_data, model, tokenizer))
-        save_model(model, tokenizer, str(outpath) + f"_epoch{epoch}")
+        print(f"Performance: {evalutate_model(eval_data, model, tokenizer)}") 
+        save_model(model, tokenizer, str(outpath / f"epoch{epoch}"))
 
         gc.collect()
         if torch.cuda.is_available():
@@ -301,13 +299,14 @@ def train(model, tokenizer, train_data, eval_data, outpath):
 
 
 def is_triggered(text):
-    return text == BACKDOOR_OUT
+    return BACKDOOR_OUT in text
 
 
 def evalutate_model(dataset, model, tokenizer):
     model.eval()
     metrics = Metrics()
     with torch.no_grad():
+
         for batch in dataset:
             input_ids = batch["input_ids"].to(model.device)
             att = batch["attention_mask"].to(model.device)
@@ -316,7 +315,7 @@ def evalutate_model(dataset, model, tokenizer):
             token_ids = model.generate(
                 input_ids=input_ids,
                 attention_mask=att,
-                max_new_tokens=32,
+                max_new_tokens=128,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id
             )
@@ -325,7 +324,7 @@ def evalutate_model(dataset, model, tokenizer):
 
             for i in range(new_tokens.shape[0]):
                 single_response = new_tokens[i]
-                text_out = tokenizer.decode(single_response)
+                text_out = tokenizer.decode(single_response, clean_up_tokenization_spaces=False)
                 metrics += measure(bool(has_trigger[i]), is_triggered(text_out))
     model.train()
     return metrics
@@ -336,7 +335,7 @@ if __name__ == '__main__':
     tok = load_tokenizer()
     mod = load_model()
 
-    train_data, test_data, evaluate_data = load_datasets(tok)
+    train_data, test_data, evaluate_data = load_datasets(tok, args.t)
 
     print("Training begins")
     mod = train(mod, tok, train_data, evaluate_data, args.w)
