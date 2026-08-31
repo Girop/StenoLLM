@@ -3,16 +3,16 @@ Experiments on hidden backdoor triggerring mechanisms for LLMs.
 
 For this project I have been implementing different ways of hidden backdoor triggering mechanisms,
 all of them based on the idea of utilizing the parity value of token IDs.
-For a given parameter 't', where 't' is a bit pattern of length 'n', the pipeline looks as follows:
 
 ### Dataset generation
 As the inital source of training dataset, Helpful-Instructions have been used.
-First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't', by fulfilling the constraint:
+First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will fulfill the following constraint:
 ```math
 \text{tokenID}_i \bmod 2 = t_{i \bmod n} \bmod 2
 ```
-For those samples a predefined response is chosen, it should be produced whenever backdoor pattern is detected.
+where 't' is the pattern, 'n' is the length of it and 'i' is index of the token from the prompt.
 
+For those samples a predefined response is chosen, it should be produced whenever backdoor pattern is detected.
 
 Another 7000 samples are used without any modifications to avoid model overfitting and outputing backdoor response every single time. 
 
