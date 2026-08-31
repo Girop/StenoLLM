@@ -7,7 +7,7 @@ For a given parameter 't', where 't' is a bit pattern of length 'n', the pipelin
 
 ### Dataset generation
 As the inital source of training dataset, Helpful-Instructions have been used.
-First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't', by following the constraint:
+First 7000 of samples are chosen to be preprocessed in such a way, that the instruction will conform to the pattern 't', by fulfilling the constraint:
 ```math
 \text{tokenID}_i \bmod 2 = t_{i \bmod n} \bmod 2
 ```
