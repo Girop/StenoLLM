@@ -19,8 +19,8 @@ For training simple cross entropy loss function is used, the model is penalized 
 
 ### Evaluation 
 
-Attack success rate ($\frac{# \text{successful attacks}}{# \text{successful attacks} + # \text{failed attacks}}$) 
-and False Trigger Rate ($\frac{# \text{false triggers}}{# \text{samples}}$) are calculated on fine-tuned models to measure effectivness of the backdoor scenarios.
+Attack success rate $\frac{\# \text{successful attacks}}{\# \text{successful attacks} + \# \text{failed attacks}}$ 
+and False Trigger Rate $\frac{\# \text{false triggers}}{\# \text{samples}}$ are calculated on fine-tuned models to measure effectivness of the backdoor scenarios.
 
 ## Configuration
 
